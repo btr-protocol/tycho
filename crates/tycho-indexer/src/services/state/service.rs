@@ -127,6 +127,7 @@ impl StateService {
             .contract_ids
             .as_deref()
             .ok_or_else(|| RpcError::Parse("contract_ids are required".to_string()))?;
+        // Slice the page out of the requested ids, like the database path does.
         let pagination = PaginationParams::from(&request.pagination);
         let page: Vec<Bytes> = ids
             .iter()
@@ -134,14 +135,20 @@ impl StateService {
             .take(pagination.page_size as usize)
             .cloned()
             .collect();
+        // Resolve the version and copy the window changes for the page, under the window lock.
         let (version, patch) =
             self.capture(&request.protocol_system, &request.version, &[], &page)?;
 
+        // Copy the cached entries under the cache read lock; folds wait until it is released.
         let mut entries = Vec::with_capacity(page.len());
         {
             let cache = self.cache.read();
             for address in &page {
                 let entry = cache.account(address);
+                // The cache keeps only the newest value, so an entry written after `version`
+                // cannot be rolled back to it. Resolving `version` in the window is not enough to
+                // rule this out: a fold can land between the capture and this read, and another
+                // extractor that shares the account folds blocks this window has not reached.
                 if entry.is_some_and(|entry| entry.newest_write() > version) {
                     return Err(StateServiceError::VersionTooOld);
                 }
@@ -149,6 +156,7 @@ impl StateService {
             }
         }
 
+        // Apply the window changes on top of each entry, without holding any lock.
         let mut accounts = Vec::with_capacity(page.len());
         for (address, entry) in page.iter().zip(entries) {
             let changes = patch
@@ -157,8 +165,11 @@ impl StateService {
                 .map_or(&[][..], Vec::as_slice);
             let (mut entry, changes) = match entry {
                 Some(entry) => (entry, changes),
-                // Not cached: the contract exists only if the window holds its creation. Folds
-                // drop changes to unknown accounts the same way.
+                // Not cached: the contract exists only if the window holds its creation. Anything
+                // else is omitted: changes to an account never created are not a complete account,
+                // and folds drop them the same way, so serving them would disagree with the cache
+                // once the block folds. The database path differs here: it builds an account from
+                // any first delta, and fails the whole request for an address it cannot find.
                 None => {
                     let Some((start, delta)) =
                         changes
@@ -188,7 +199,7 @@ impl StateService {
             for change in changes {
                 entry.apply_block(change.delta.as_ref(), change.balances.as_ref(), change.at);
             }
-            accounts.push(dto::ResponseAccount::from(Account::from(&entry)));
+            accounts.push(dto::ResponseAccount::from(Account::from(entry)));
         }
 
         Ok(dto::StateRequestResponse::new(
@@ -215,6 +226,7 @@ impl StateService {
             .protocol_ids
             .as_deref()
             .ok_or_else(|| RpcError::Parse("protocol_ids are required".to_string()))?;
+        // Slice the page out of the requested ids, like the database path does.
         let pagination = PaginationParams::from(&request.pagination);
         let page: Vec<&str> = ids
             .iter()
@@ -223,13 +235,17 @@ impl StateService {
             .map(String::as_str)
             .collect();
         let system = &request.protocol_system;
+        // Resolve the version and copy the window changes for the page, under the window lock.
         let (version, patch) = self.capture(system, &request.version, &page, &[])?;
 
+        // Copy the cached entries under the cache read lock; folds wait until it is released.
         let mut entries = Vec::with_capacity(page.len());
         {
             let cache = self.cache.read();
             for id in &page {
                 let entry = cache.component(system, id);
+                // As for accounts: a fold can land between the capture and this read and move the
+                // entry past `version`, which the cache cannot roll back.
                 if entry.is_some_and(|entry| entry.updated_at() > version) {
                     return Err(StateServiceError::VersionTooOld);
                 }
@@ -237,6 +253,7 @@ impl StateService {
             }
         }
 
+        // Apply the window changes on top of each entry, without holding any lock.
         let mut states = Vec::with_capacity(page.len());
         for (id, entry) in page.iter().zip(entries) {
             let changes = patch
@@ -249,8 +266,9 @@ impl StateService {
                     let newer = changes.partition_point(|change| change.at <= entry.updated_at());
                     (entry, &changes[newer..])
                 }
-                // Not cached: the component exists only if the window holds its creation. Folds
-                // drop changes to unknown components the same way.
+                // Not cached: the component exists only if the window holds its creation. Anything
+                // else is omitted, as folds drop it. The database path differs here: it serves an
+                // unknown id as an empty state.
                 None => {
                     let Some(start) = changes
                         .iter()
@@ -273,7 +291,7 @@ impl StateService {
             for change in changes {
                 entry.apply_block(change.delta.as_ref(), change.balances.as_ref(), change.at);
             }
-            let mut state = ProtocolComponentState::from(&entry);
+            let mut state = ProtocolComponentState::from(entry);
             if !request.include_balances {
                 state.balances.clear();
             }
