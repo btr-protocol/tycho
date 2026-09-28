@@ -21,8 +21,6 @@ use tycho_common::{
     Bytes,
 };
 
-#[cfg(test)]
-use crate::services::state::window::{new_windows, DiscardSink, WindowConfig};
 use crate::{
     extractor::{
         reorg_buffer::{BlockNumberOrTimestamp, CommitStatus},
@@ -103,9 +101,13 @@ pub trait PendingDeltasBuffer {
 }
 
 impl PendingDeltas {
-    /// Windows at the default depth, folding into a [`DiscardSink`].
+    /// Windows at the default depth, folding into a `DiscardSink`.
+    // The facade's former constructor, kept only so the tests below stay short.
+    // TODO: remove it with the rest of `PendingDeltas` once `DeltaWindow` takes over its jobs.
     #[cfg(test)]
     pub fn new<'a>(extractors: impl IntoIterator<Item = &'a str>) -> Self {
+        use crate::services::state::window::{new_windows, DiscardSink, WindowConfig};
+
         Self::from_windows(new_windows(extractors, WindowConfig::default()), Arc::new(DiscardSink))
     }
 
@@ -571,7 +573,12 @@ mod test {
     };
 
     use super::*;
-    use crate::{extractor::models::fixtures, testing, testing::block};
+    use crate::{
+        extractor::models::fixtures,
+        services::state::window::{new_windows, DiscardSink, WindowConfig},
+        testing,
+        testing::block,
+    };
 
     fn vm_state() -> Account {
         Account::new(
