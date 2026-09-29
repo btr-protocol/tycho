@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.2.0
+
+- Emit tick net liquidity, pool balances, and the liquidity changes of mints and burns as
+  `ChangeType::Delta` instead of absolute values read from additive stores. The indexer adds each
+  delta to the stored value, so the absolute values it stores match v0.1.4 when replayed from the
+  factory's deployment, and an indexer bootstrapped from a state snapshot at block N can stream
+  it from N+1. The `store_pools_balances`, `store_ticks_liquidity` and `store_liquidity` modules
+  are removed. `store_pools` and `store_pool_current_tick` remain and still build from the
+  manifest's `initialBlock`.
+- A tick whose net liquidity returns to zero now keeps a zero attribute instead of being deleted.
+- When `store_pool_current_tick` holds no tick for a pool, a mint or burn counts as in range when
+  it moves both tokens. This only happens when a manifest's `initialBlock` is later than the
+  pool's last `Initialize` or `Swap`.
+- Depend on the in-repo `tycho-substreams` and `substreams-helper` crates, which carry
+  `ChangeType::Delta`.
+
 ## v0.1.4
 
 - Take `protocol_type_name` as a `map_pools_created` parameter instead of hardcoding

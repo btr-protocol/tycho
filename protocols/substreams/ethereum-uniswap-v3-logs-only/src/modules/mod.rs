@@ -14,17 +14,20 @@ mod store_pools;
 #[path = "3_map_events.rs"]
 mod map_events;
 
-#[path = "4_map_and_store_balance_changes.rs"]
-mod map_store_balance_changes;
+#[path = "4_map_balance_changes.rs"]
+mod map_balance_changes;
 
-#[path = "4_map_and_store_ticks.rs"]
-mod map_store_ticks;
+#[path = "4_map_ticks.rs"]
+mod map_ticks;
 
 #[path = "4_map_and_store_liquidity.rs"]
 mod map_store_liquidity;
 
 #[path = "5_map_protocol_changes.rs"]
 mod map_protocol_changes;
+
+#[cfg(test)]
+mod replay_tests;
 
 impl From<TransactionTrace> for Transaction {
     fn from(value: TransactionTrace) -> Self {
