@@ -43,7 +43,7 @@ use super::{
     cache::{CachedAccount, CachedComponentState, EntityCache},
     window::{DeltaWindow, WindowResolution},
 };
-use crate::services::{deltas_buffer::PendingDeltasError, rpc::RpcError};
+use crate::services::rpc::RpcError;
 
 /// Which path answers state requests, holding what the cache modes need: the loaded
 /// [`EntityCache`] when building the services, the [`StateService`] once built.
@@ -117,7 +117,7 @@ impl StateService {
     /// [`StateServiceError::Rpc`] with:
     ///
     /// - `RpcError::Parse` (400) when `contract_ids` is `None`: the cache serves explicit ids only.
-    /// - `RpcError::DeltasError` (500), the database path's error, when an address is neither
+    /// - `RpcError::Storage(StorageError::NotFound("Contract", ..))` when an address is neither
     ///   cached nor changed by a delta in the window.
     /// - `RpcError::Parse` (400) when the version is malformed, or `protocol_system` is empty or
     ///   has no window. Today this silently reads the database.
@@ -174,7 +174,9 @@ impl StateService {
                 Some(entry) => (entry, changes),
                 // Not cached: build the account from its first delta in the window and apply the
                 // rest, as the database path does for an address it does not hold. An address with
-                // no delta fails the whole request with the database path's error.
+                // no delta fails the whole request, as it does on the database path.
+                // TODO: serve unknown ids the same way for accounts and components: both as an
+                // empty entity or both as an error.
                 None => {
                     let Some((start, delta)) =
                         changes
@@ -187,8 +189,9 @@ impl StateService {
                                     .map(|delta| (i, delta))
                             })
                     else {
-                        return Err(RpcError::DeltasError(PendingDeltasError::ReorgBufferError(
-                            StorageError::NotFound("Contract".to_string(), address.to_string()),
+                        return Err(RpcError::Storage(StorageError::NotFound(
+                            "Contract".to_string(),
+                            address.to_string(),
                         ))
                         .into());
                     };
@@ -630,7 +633,7 @@ mod test {
     }
 
     #[test]
-    fn contract_state_fails_like_the_database_path_for_an_unknown_address() {
+    fn contract_state_fails_for_an_unknown_address() {
         let harness = accounts();
 
         let result = harness
@@ -641,15 +644,11 @@ mod test {
             ));
 
         let Err(StateServiceError::Rpc(err)) = result else {
-            panic!("expected the database path's error, got {result:?}");
+            panic!("expected a not-found error, got {result:?}");
         };
-        assert_eq!(
-            err.to_string(),
-            RpcError::DeltasError(PendingDeltasError::ReorgBufferError(StorageError::NotFound(
-                "Contract".to_string(),
-                addr(4).to_string()
-            )))
-            .to_string()
+        assert!(
+            matches!(&err, RpcError::Storage(StorageError::NotFound(entity, id)) if entity == "Contract" && *id == addr(4).to_string()),
+            "{err:?}"
         );
     }
 
