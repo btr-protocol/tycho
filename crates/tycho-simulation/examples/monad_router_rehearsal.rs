@@ -608,7 +608,7 @@ async fn main() -> Result<()> {
             };
             let tok_out = addr(c.token_out.0);
             // Dry run to read the executed output: floor 1 (the router rejects a zero min) and an
-            // unreachable expected amount, so positive-slippage capture takes nothing.
+            // unreachable expected amount, so positive-slippage capture (if on) takes nothing.
             let (one, cap) = (BigUint::from(1u8), BigUint::from(1u8) << 128);
             let (data, value) = router_call(&*encoder, solution(&user_b, &c, &cap, &one))?;
             let dry = fork
@@ -627,8 +627,8 @@ async fn main() -> Result<()> {
                 .send(user, a.router, value, data)
                 .await?;
             let out = fork.balance(tok_out, user).await? - before;
-            // Executed (uncapped dry run) vs quote. Capped `actual` cannot exceed the quote:
-            // positive-slippage capture sends any surplus to the fee receiver.
+            // Executed (uncapped dry run) vs quote. With positive-slippage capture on, `received`
+            // cannot exceed the quote: the surplus goes to the fee receiver.
             let bps = quote.as_ref().map(|q| {
                 let q = I256::from_raw(u256(q));
                 (I256::from_raw(dry) - q) * I256::from_raw(U256::from(10_000u64)) / q

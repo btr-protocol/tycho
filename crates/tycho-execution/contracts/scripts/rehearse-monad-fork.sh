@@ -2,7 +2,8 @@
 # Rehearses the Monad deployment on an anvil fork: FeeCalculator, executors and TychoRouterV3
 # through the normal deploy scripts, roles as roles.json grants them, executors registered by the
 # EXECUTOR_SETTER_ROLE holder (impersonated), the 1-day activation timelock warped, then one swap
-# per executor via examples/monad_router_rehearsal.rs.
+# per executor via examples/monad_router_rehearsal.rs. The owner-Safe batch also turns off
+# positive-slippage capture, which FeeCalculator's constructor enables.
 #
 # Signs with anvil's test key 0, read from anvil's own banner at run time. Nothing is broadcast
 # outside the fork.
@@ -81,6 +82,11 @@ cast rpc anvil_impersonateAccount "$SETTER" --rpc-url "$FORK" >/dev/null
 cast rpc anvil_setBalance "$SETTER" 0x56BC75E2D63100000 --rpc-url "$FORK" >/dev/null
 cast send "$ROUTER" 'setExecutors(address[])' "$EXECUTORS" --from "$SETTER" --unlocked --rpc-url "$FORK" |
     grep -E '^(status|gasUsed)'
+# Same owner-Safe batch: surplus stays with the caller (CoopArb's balance-delta profit check).
+cast send "$FEE_CALCULATOR" 'setPositiveSlippageEnabled(bool)' false --from "$(role ROUTER_FEE_SETTER)" --unlocked \
+    --rpc-url "$FORK" | grep -E '^status'
+eq "$(cast call "$FEE_CALCULATOR" 'getPositiveSlippageEnabled()(bool)' --rpc-url "$FORK")" false "positive slippage capture"
+echo "positive slippage capture: off"
 cast rpc evm_increaseTime 86401 --rpc-url "$FORK" >/dev/null
 cast rpc evm_mine --rpc-url "$FORK" >/dev/null
 
