@@ -20,6 +20,7 @@ extractor/
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
   protocol_cache.rs         ProtocolMemoryCache — in-process token/component metadata cache
   chain_state.rs            ChainState — tracks current tip and finality horizon
+  deltas.rs                 Resolves CHANGE_TYPE_DELTA attributes and balances into absolute values
   u256_num.rs               U256 numeric utilities
   token_analysis_cron.rs    Background job: token quality / tax analysis
   dynamic_contract_indexer/ DCI optional extension (see below)
@@ -71,7 +72,12 @@ extension `E`. It is the single point that turns raw Substreams messages into ty
 
 1. Deserialize `BlockScopedData` → `BlockChanges` (tx-level state/balance deltas) via
    `tycho-protobuf`'s `TryFromMessage` conversions; its `DecodeError` converts into
-   `ExtractionError`.
+   `ExtractionError`. Before the conversion, `resolve_deltas` rewrites every
+   `CHANGE_TYPE_DELTA` attribute and balance into the absolute value it produces, reading the
+   prior value from earlier txs of the message, the pending partial block, the `ReorgBuffer`,
+   then the DB (see `deltas.rs`). A delta whose key has no prior value starts from zero; one
+   whose component is unknown everywhere fails the message. Buffers, DB and subscribers only
+   see absolute values, so reverts restore deltas like any other update.
 2. Run post-processor if configured.
 3. Call `E::process_block_update()` (DCI — see below).
 4. Fetch metadata for any new token addresses via `T` (ERC-20 symbol / decimals over RPC).
@@ -125,7 +131,8 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
    `protocol_component` table. `false` means an upstream module emitted state for a
    component Tycho never saw created. The extractor registers both label sets at zero at
    startup so the first miss is visible to `increase()`. Any hit means an upstream module
-   emitted an Update or Deletion for an attribute that never had a Creation.
+   emitted an Update or Deletion for an attribute that never had a Creation. An attribute whose
+   latest buffered change before the range is a deletion reverts as a deletion.
 4. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
    a `BlockAggregatedChanges` with `revert = true` is broadcast.
 5. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted

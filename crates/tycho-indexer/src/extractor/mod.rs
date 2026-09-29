@@ -35,6 +35,7 @@ use crate::{
 };
 
 pub mod chain_state;
+mod deltas;
 mod dynamic_contract_indexer;
 pub mod factory;
 pub mod models;
@@ -255,7 +256,7 @@ where
     fn get_filtered_protocol_state_update(
         &self,
         keys: Vec<(&ProtocolStateIdType, &ProtocolStateKeyType)>,
-    ) -> HashMap<(ProtocolStateIdType, ProtocolStateKeyType), ProtocolStateValueType> {
+    ) -> HashMap<(ProtocolStateIdType, ProtocolStateKeyType), Option<ProtocolStateValueType>> {
         self.block_update
             .get_filtered_protocol_state_update(keys)
     }
