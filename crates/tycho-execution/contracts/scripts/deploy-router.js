@@ -1,7 +1,6 @@
 require('dotenv').config();
-const {ethers} = require("hardhat");
 const hre = require("hardhat");
-const {resolveRolesNetwork, verifyOnExplorer} = require("./utils");
+const {deployCreate2, resolveRolesNetwork} = require("./utils");
 
 async function main() {
     const network = hre.network.name;
@@ -22,91 +21,21 @@ async function main() {
     console.log(`- executorSetterAdmin: ${executorSetter}`);
     console.log(`- routerFeeSetterAdmin: ${routerFeeSetter}`);
 
-    const [deployer] = await ethers.getSigners();
-    console.log(`Deploying with account: ${deployer.address}`);
-    console.log(`Account balance: ${ethers.utils.formatEther(await deployer.getBalance())} ETH`);
-
-    // Deterministic Deployment Proxy
-    // More info: https://getfoundry.sh/guides/deterministic-deployments-using-create2/
-    const create2FactoryAddress = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
-    console.log(`Using CREATE2 factory at: ${create2FactoryAddress}`);
-
-    // Get TychoRouterV3 bytecode with constructor arguments
-    const TychoRouterV3 = await ethers.getContractFactory("TychoRouterV3");
-    const deployTx = TychoRouterV3.getDeployTransaction(
-        permit2,
-        feeCalculator,
-        unpauser,
-        unpauser,
-        executorSetter,
-        routerFeeSetter
-    );
-    const bytecode = deployTx.data;
-
-    // Use a salt based on network and contract name for deterministic addresses
-    const salt = ethers.utils.id(`TychoRouterV3-${network}`);
-
-    // Compute the address where the contract will be deployed
-    // CREATE2 address = keccak256(0xff ++ factory_address ++ salt ++ keccak256(bytecode))[12:]
-    const bytecodeHash = ethers.utils.keccak256(bytecode);
-    const computedAddress = ethers.utils.getCreate2Address(create2FactoryAddress, salt, bytecodeHash);
-    console.log(`TychoRouterV3 will be deployed to: ${computedAddress}`);
-
-    // The address is derived from the bytecode and the constructor arguments, so
-    // an existing contract there is this exact build. Skipping the deployment
-    // makes the script re-runnable, which matters when verification has to be
-    // retried.
-    const deployed =
-        (await ethers.provider.getCode(computedAddress)) !== "0x";
-    if (deployed) {
-        console.log("TychoRouterV3 already deployed, skipping deployment");
-    } else {
-        const deploymentData = ethers.utils.concat([salt, bytecode]);
-        const tx = await deployer.sendTransaction({
-            to: create2FactoryAddress,
-            data: deploymentData,
-        });
-        await tx.wait();
-        console.log(`TychoRouterV3 deployed to: ${computedAddress}`);
-    }
-
-    // Verify on Tenderly
-    try {
-        console.log("Verifying contract on Tenderly...");
-        await hre.tenderly.verify({
-            name: "TychoRouterV3",
-            address: computedAddress,
-        });
-        console.log("Contract verified successfully on Tenderly");
-    } catch (error) {
-        console.error("Error during contract verification:", error);
-    }
-
-    if (!deployed) {
-        console.log("Waiting for 1 minute before verifying the contract...");
-        await new Promise(resolve => setTimeout(resolve, 60000));
-    }
-
-    // Verify on the block explorer
-    try {
-        await verifyOnExplorer({
-            network,
-            address: computedAddress,
-            contractFqn: "src/TychoRouterV3.sol:TychoRouterV3",
-            constructorArgs: [
-                permit2,
-                feeCalculator,
-                unpauser,
-                unpauser,
-                executorSetter,
-                routerFeeSetter,
-            ],
-        });
-        console.log(`TychoRouterV3 verified successfully on blockchain explorer!`);
-    } catch (error) {
-        console.error(`Error during blockchain explorer verification:`, error);
-    }
-
+    const address = await deployCreate2({
+        contractName: "TychoRouterV3",
+        contractFqn: "src/TychoRouterV3.sol:TychoRouterV3",
+        args: [
+            permit2,
+            feeCalculator,
+            unpauser,
+            unpauser,
+            executorSetter,
+            routerFeeSetter,
+        ],
+        network,
+        gasLimit: null,
+    });
+    console.log(`TychoRouterV3: ${address}`);
 }
 
 main()

@@ -1,7 +1,6 @@
 require('dotenv').config();
-const {ethers} = require("hardhat");
 const hre = require("hardhat");
-const {resolveRolesNetwork, verifyOnExplorer} = require("./utils");
+const {deployCreate2, resolveRolesNetwork} = require("./utils");
 
 async function main() {
     const network = hre.network.name;
@@ -20,87 +19,13 @@ async function main() {
     console.log(`- routerFeeSetter: ${routerFeeSetter}`);
     console.log(`- routerFeeReceiver: ${routerFeeReceiver}`);
 
-    const [deployer] = await ethers.getSigners();
-    console.log(`Deploying with account: ${deployer.address}`);
-    console.log(
-        `Account balance: ${ethers.utils.formatEther(await deployer.getBalance())} ETH`
-    );
-
-    // Deterministic Deployment Proxy
-    // More info: https://getfoundry.sh/guides/deterministic-deployments-using-create2/
-    const create2FactoryAddress =
-        "0x4e59b44847b379578588920cA78FbF26c0B4956C";
-    console.log(`Using CREATE2 factory at: ${create2FactoryAddress}`);
-
-    const FeeCalculator =
-        await ethers.getContractFactory("FeeCalculator");
-    const deployTx =
-        FeeCalculator.getDeployTransaction(routerFeeSetter, routerFeeReceiver);
-    const bytecode = deployTx.data;
-
-    const salt = ethers.utils.id(`FeeCalculator-${network}`);
-
-    const bytecodeHash = ethers.utils.keccak256(bytecode);
-    const computedAddress = ethers.utils.getCreate2Address(
-        create2FactoryAddress,
-        salt,
-        bytecodeHash
-    );
-    console.log(`FeeCalculator will be deployed to: ${computedAddress}`);
-
-    // The address is derived from the bytecode, so an existing contract there is
-    // this exact build. Skipping the deployment makes the script re-runnable,
-    // which matters when verification has to be retried.
-    const deployed =
-        (await ethers.provider.getCode(computedAddress)) !== "0x";
-    if (deployed) {
-        console.log("FeeCalculator already deployed, skipping deployment");
-    } else {
-        const deploymentData = ethers.utils.concat([salt, bytecode]);
-        const tx = await deployer.sendTransaction({
-            to: create2FactoryAddress,
-            data: deploymentData,
-            gasLimit: 3_000_000,
-        });
-        await tx.wait();
-        console.log(`FeeCalculator deployed to: ${computedAddress}`);
-    }
-
-    // Verify on Tenderly
-    try {
-        await hre.tenderly.verify({
-            name: "FeeCalculator",
-            address: computedAddress,
-        });
-        console.log("Contract verified successfully on Tenderly");
-    } catch (error) {
-        console.error("Error during contract verification:", error);
-    }
-
-    if (!deployed) {
-        console.log(
-            "Waiting for 1 minute before verifying the contract..."
-        );
-        await new Promise(resolve => setTimeout(resolve, 60000));
-    }
-
-    // Verify on the block explorer
-    try {
-        await verifyOnExplorer({
-            network,
-            address: computedAddress,
-            contractFqn: "src/FeeCalculator.sol:FeeCalculator",
-            constructorArgs: [routerFeeSetter, routerFeeReceiver],
-        });
-        console.log(
-            "FeeCalculator verified successfully on blockchain explorer!"
-        );
-    } catch (error) {
-        console.error(
-            "Error during blockchain explorer verification:",
-            error
-        );
-    }
+    const address = await deployCreate2({
+        contractName: "FeeCalculator",
+        contractFqn: "src/FeeCalculator.sol:FeeCalculator",
+        args: [routerFeeSetter, routerFeeReceiver],
+        network,
+    });
+    console.log(`FeeCalculator: ${address}`);
 }
 
 main()

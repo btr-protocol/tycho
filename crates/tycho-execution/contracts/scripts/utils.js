@@ -308,45 +308,102 @@ async function proposeTransaction(safeAddress, txData, signer, methodName) {
 // More info: https://getfoundry.sh/guides/deterministic-deployments-using-create2/
 const CREATE2_FACTORY = "0x4e59b44847b379578588920cA78FbF26c0B4956C";
 
+// Optional CREATE3 path: set CREATE3_FACTORY and CREATE3_SALTS. The factory
+// exposes deploy(bytes32,bytes) and predict(address,bytes32) and namespaces the
+// salt by msg.sender, so the address depends on the deployer and the salt only,
+// not on the bytecode. CREATE3_SALTS is a JSON file outside the repo shaped
+// {"contracts": {"<contractName>": {"salt": "0x..."}}}.
+const CREATE3_ABI = [
+    "function deploy(bytes32 salt, bytes initCode) payable returns (address)",
+    "function predict(address deployer, bytes32 salt) view returns (address)",
+];
+
+function create3Salt(contractName) {
+    if (!process.env.CREATE3_SALTS) {
+        throw new Error("CREATE3_FACTORY is set but CREATE3_SALTS is not");
+    }
+    const salts = JSON.parse(fs.readFileSync(process.env.CREATE3_SALTS, "utf8"));
+    const salt = salts.contracts?.[contractName]?.salt;
+    if (!salt) {
+        throw new Error(`No CREATE3 salt for ${contractName} in CREATE3_SALTS`);
+    }
+    return salt;
+}
+
 /**
- * Deploys `contractName` through the CREATE2 factory, then verifies it on
- * Tenderly and on the network's block explorer.
+ * Deploys `contractName` deterministically, then verifies it on Tenderly and on
+ * the network's block explorer (skipped when SKIP_VERIFY is set).
  *
- * The address is derived from the bytecode and the constructor arguments, so an
- * existing contract there is this exact build. The deployment is then skipped,
+ * Default: the CREATE2 factory with salt `${contractName}-${network}`. The
+ * address is derived from the bytecode and the constructor arguments, so an
+ * existing contract there is this exact build and the deployment is skipped,
  * which makes the script re-runnable when verification has to be retried.
+ * With CREATE3_FACTORY set, the address comes from the CREATE3 factory instead
+ * (see create3Salt) and existing code there is an error.
  *
+ * @param gasLimit deployment gas limit; null lets the provider estimate it.
  * @returns the contract's address.
  */
-async function deployCreate2({contractName, contractFqn, args, network}) {
+async function deployCreate2({contractName, contractFqn, args, network, gasLimit = 3_000_000}) {
     const [deployer] = await ethers.getSigners();
     console.log(`Deploying with account: ${deployer.address}`);
     console.log(
         `Account balance: ${ethers.utils.formatEther(await deployer.getBalance())} ETH`
     );
-    console.log(`Using CREATE2 factory at: ${CREATE2_FACTORY}`);
 
     const factory = await ethers.getContractFactory(contractName);
     const bytecode = factory.getDeployTransaction(...args).data;
-    const salt = ethers.utils.id(`${contractName}-${network}`);
-    const address = ethers.utils.getCreate2Address(
-        CREATE2_FACTORY,
-        salt,
-        ethers.utils.keccak256(bytecode)
-    );
+    const overrides = gasLimit ? {gasLimit} : {};
+
+    let address;
+    let sendDeploy;
+    if (process.env.CREATE3_FACTORY) {
+        const create3 = new ethers.Contract(
+            process.env.CREATE3_FACTORY, CREATE3_ABI, deployer
+        );
+        console.log(`Using CREATE3 factory at: ${create3.address}`);
+        const salt = create3Salt(contractName);
+        address = await create3.predict(deployer.address, salt);
+        sendDeploy = () => create3.deploy(salt, bytecode, overrides);
+    } else {
+        console.log(`Using CREATE2 factory at: ${CREATE2_FACTORY}`);
+        const salt = ethers.utils.id(`${contractName}-${network}`);
+        address = ethers.utils.getCreate2Address(
+            CREATE2_FACTORY,
+            salt,
+            ethers.utils.keccak256(bytecode)
+        );
+        sendDeploy = () => deployer.sendTransaction({
+            to: CREATE2_FACTORY,
+            data: ethers.utils.concat([salt, bytecode]),
+            ...overrides,
+        });
+    }
     console.log(`${contractName} will be deployed to: ${address}`);
 
     const deployed = (await ethers.provider.getCode(address)) !== "0x";
+    // A CREATE3 address does not commit to the bytecode, so existing code there
+    // may be a different build (other constructor args or roles).
+    if (deployed && process.env.CREATE3_FACTORY) {
+        throw new Error(
+            `${contractName}: ${address} already has code; CREATE3 cannot ` +
+            "tell whether it is this build. Check it by hand."
+        );
+    }
     if (deployed) {
         console.log(`${contractName} already deployed, skipping deployment`);
     } else {
-        const tx = await deployer.sendTransaction({
-            to: CREATE2_FACTORY,
-            data: ethers.utils.concat([salt, bytecode]),
-            gasLimit: 3_000_000,
-        });
-        await tx.wait();
-        console.log(`${contractName} deployed to: ${address}`);
+        const receipt = await (await sendDeploy()).wait();
+        if ((await ethers.provider.getCode(address)) === "0x") {
+            throw new Error(`${contractName}: no code at ${address} after deployment`);
+        }
+        console.log(
+            `${contractName} deployed to: ${address} (gas ${receipt.gasUsed})`
+        );
+    }
+
+    if (process.env.SKIP_VERIFY) {
+        return address;
     }
 
     try {
