@@ -7,11 +7,12 @@
 //!
 //! # Read order
 //!
-//! A read holds the window lock while it resolves the version and captures the patch, releases
-//! it, then takes the cache read lock and copies the entries out. Folds hold the window lock
-//! while they take the cache write lock, so a fold can land between the two steps. That is
-//! harmless: the fold moves blocks from the patch into the entries, and a patch change applies
-//! only when it is newer than the value's write timestamp, so nothing is applied twice or lost.
+//! A read holds the window lock while it resolves the version and copies the window changes for
+//! its ids, releases it, then takes the cache read lock and copies the entries out. Folds hold the
+//! window lock while they take the cache write lock, so a fold can land between the two steps.
+//! That is harmless: the fold moves blocks from the copied changes into the entries, and a change
+//! applies only when it is newer than the value's write timestamp, so nothing is applied twice or
+//! lost.
 //! A fold can also carry an entry past the requested version; the request then fails with
 //! [`StateServiceError::VersionTooOld`].
 //!
@@ -26,22 +27,25 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, MutexGuard},
 };
 
 use thiserror::Error;
 use tycho_common::{
     dto::{self, PaginationResponse},
-    models::{contract::Account, protocol::ProtocolComponentState, ChangeType, PaginationParams},
+    models::{
+        blockchain::Block, contract::Account, protocol::ProtocolComponentState, ChangeType,
+        PaginationParams,
+    },
     storage::{BlockOrTimestamp, StorageError, WriteTimestamp},
     Bytes,
 };
 
 use super::{
     cache::{CachedAccount, CachedComponentState, EntityCache},
-    window::{DeltaWindow, WindowPatch, WindowResolution},
+    window::{DeltaWindow, WindowResolution},
 };
-use crate::{extractor::reorg_buffer::BlockNumberOrTimestamp, services::rpc::RpcError};
+use crate::services::rpc::RpcError;
 
 /// Which path answers state requests, holding what the cache modes need: the loaded
 /// [`EntityCache`] when building the services, the [`StateService`] once built.
@@ -135,9 +139,14 @@ impl StateService {
             .take(pagination.page_size as usize)
             .cloned()
             .collect();
-        // Resolve the version and copy the window changes for the page, under the window lock.
-        let (version, patch) =
-            self.capture(&request.protocol_system, &request.version, &[], &page)?;
+        // Resolve the version and copy the window changes for the page under one window lock, so
+        // both see the same blocks.
+        let (window, block) = self.resolve(&request.protocol_system, &request.version)?;
+        let window_changes = window
+            .account_changes(&page, block.number)
+            .map_err(RpcError::from)?;
+        drop(window);
+        let version = WriteTimestamp::from(&block);
 
         // Copy the cached entries under the cache read lock; folds wait until it is released.
         let mut entries = Vec::with_capacity(page.len());
@@ -159,8 +168,7 @@ impl StateService {
         // Apply the window changes on top of each entry, without holding any lock.
         let mut accounts = Vec::with_capacity(page.len());
         for (address, entry) in page.iter().zip(entries) {
-            let changes = patch
-                .accounts
+            let changes = window_changes
                 .get(address)
                 .map_or(&[][..], Vec::as_slice);
             let (mut entry, changes) = match entry {
@@ -235,8 +243,14 @@ impl StateService {
             .map(String::as_str)
             .collect();
         let system = &request.protocol_system;
-        // Resolve the version and copy the window changes for the page, under the window lock.
-        let (version, patch) = self.capture(system, &request.version, &page, &[])?;
+        // Resolve the version and copy the window changes for the page under one window lock, so
+        // both see the same blocks.
+        let (window, block) = self.resolve(system, &request.version)?;
+        let window_changes = window
+            .component_changes(&page, block.number)
+            .map_err(RpcError::from)?;
+        drop(window);
+        let version = WriteTimestamp::from(&block);
 
         // Copy the cached entries under the cache read lock; folds wait until it is released.
         let mut entries = Vec::with_capacity(page.len());
@@ -256,8 +270,7 @@ impl StateService {
         // Apply the window changes on top of each entry, without holding any lock.
         let mut states = Vec::with_capacity(page.len());
         for (id, entry) in page.iter().zip(entries) {
-            let changes = patch
-                .components
+            let changes = window_changes
                 .get(*id)
                 .map_or(&[][..], Vec::as_slice);
             let (mut entry, changes) = match entry {
@@ -304,16 +317,14 @@ impl StateService {
         ))
     }
 
-    /// Resolves `version` in the window of `protocol_system` and captures that window's changes
-    /// to `components` and `accounts` up to it, under one lock so both see the same blocks.
-    /// Returns the timestamp of the resolved block with the patch.
-    fn capture(
+    /// Locks the window of `protocol_system` and resolves `version` in it. Returns the locked
+    /// window with the resolved block, so the caller can read the window's changes up to that
+    /// block before a new block arrives; the pump waits until the guard is dropped.
+    fn resolve(
         &self,
         protocol_system: &str,
         version: &dto::VersionParam,
-        components: &[&str],
-        accounts: &[Bytes],
-    ) -> Result<(WriteTimestamp, WindowPatch), StateServiceError> {
+    ) -> Result<(MutexGuard<'_, DeltaWindow>, Block), StateServiceError> {
         let window = self
             .windows
             .get(protocol_system)
@@ -324,21 +335,15 @@ impl StateService {
         let window = window
             .lock()
             .map_err(|err| RpcError::Unknown(format!("Delta window lock poisoned: {err}")))?;
-        let block = match window.resolve(&version) {
-            WindowResolution::InWindow(block) => block,
-            WindowResolution::BelowFloor => return Err(StateServiceError::VersionTooOld),
-            WindowResolution::AboveTip => {
-                return Err(RpcError::Storage(StorageError::NotFound(
-                    "Block".to_string(),
-                    format!("{version:?}"),
-                ))
-                .into())
-            }
-        };
-        let patch = window
-            .capture_patch(components, accounts, Some(BlockNumberOrTimestamp::Number(block.number)))
-            .map_err(RpcError::from)?;
-        Ok((WriteTimestamp::from(&block), patch))
+        match window.resolve(&version) {
+            WindowResolution::InWindow(block) => Ok((window, block)),
+            WindowResolution::BelowFloor => Err(StateServiceError::VersionTooOld),
+            WindowResolution::AboveTip => Err(RpcError::Storage(StorageError::NotFound(
+                "Block".to_string(),
+                format!("{version:?}"),
+            ))
+            .into()),
+        }
     }
 }
 
