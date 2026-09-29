@@ -34,13 +34,13 @@ use thiserror::Error;
 use tracing::error;
 use tycho_common::{
     dto::{self, PaginationResponse},
-    models::{contract::Account, protocol::ProtocolComponentState, PaginationParams},
+    models::{contract::Account, protocol::ProtocolComponentState, MergeError, PaginationParams},
     storage::{BlockOrTimestamp, StorageError, WriteTimestamp},
     Bytes,
 };
 
 use super::{
-    cache::{CachedAccount, CachedComponentState, EntityCache},
+    cache::{CachedAccount, EntityCache},
     window::{DeltaWindow, WindowResolution},
 };
 use crate::services::rpc::RpcError;
@@ -273,38 +273,36 @@ impl StateService {
             }
         }
 
-        // Apply the window changes on top of each entry, without holding any lock.
+        // Apply the window changes on top of each entry, without holding any lock, with the
+        // database path's merge. The changes hold absolute values in block order, so re-applying
+        // one that a fold already moved into the entry leaves the same state.
         let mut states = Vec::with_capacity(page.len());
         for (id, entry) in page.iter().zip(entries) {
-            let changes = window_changes
+            // Not cached: start from an empty state, as the database path does for an id it does
+            // not hold. An id the window never changed is served as that empty state.
+            // TODO: serve unknown ids the same way for accounts and components: both as an empty
+            // entity or both as an error.
+            let mut state = entry.map_or_else(
+                || ProtocolComponentState::new(id, HashMap::new(), HashMap::new()),
+                ProtocolComponentState::from,
+            );
+            let merge_error = |err: MergeError| RpcError::Unknown(err.to_string());
+            for change in window_changes
                 .get(*id)
-                .map_or(&[][..], Vec::as_slice);
-            let (mut entry, changes) = match entry {
-                // A fold may have landed after the capture; its changes are already in the entry.
-                Some(entry) => {
-                    let newer = changes.partition_point(|change| change.at <= entry.updated_at());
-                    (entry, &changes[newer..])
+                .into_iter()
+                .flatten()
+            {
+                if let Some(delta) = &change.delta {
+                    state
+                        .apply_state_delta(delta)
+                        .map_err(merge_error)?;
                 }
-                // Not cached: start from an empty state and apply every window change, as the
-                // database path does for an id it does not hold. An id the window never changed is
-                // served as that empty state.
-                None => match changes.split_first() {
-                    Some((first, rest)) => (
-                        CachedComponentState::from_creation(
-                            id,
-                            first.delta.as_ref(),
-                            first.balances.as_ref(),
-                            first.at,
-                        ),
-                        rest,
-                    ),
-                    None => (CachedComponentState::from_creation(id, None, None, version), changes),
-                },
-            };
-            for change in changes {
-                entry.apply_block(change.delta.as_ref(), change.balances.as_ref(), change.at);
+                if let Some(balances) = &change.balances {
+                    state
+                        .apply_balance_delta(balances)
+                        .map_err(merge_error)?;
+                }
             }
-            let mut state = ProtocolComponentState::from(entry);
             if !request.include_balances {
                 state.balances.clear();
             }
@@ -767,6 +765,23 @@ mod test {
         assert_eq!(response.states[1].attributes["x"], Bytes::from(6u64));
         assert_eq!(response.states[2].attributes["x"], Bytes::from(6u64));
         assert!(response.states[3].attributes.is_empty() && response.states[3].balances.is_empty());
+    }
+
+    #[test]
+    fn protocol_state_reapplies_a_block_already_folded_into_the_entry() {
+        let harness = components();
+        // A fold that lands after the capture: block 4 is both in the window and in the entry.
+        harness
+            .cache
+            .fold(&testing::with_state_delta(msg(4), "c1", 4))
+            .unwrap();
+
+        let response = harness
+            .service
+            .protocol_state(&protocol_request(&["c1"], dto::VersionParam::default()))
+            .unwrap();
+
+        assert_eq!(response.states[0].attributes["x"], Bytes::from(5u64));
     }
 
     #[test]
