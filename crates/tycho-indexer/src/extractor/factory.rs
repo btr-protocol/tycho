@@ -25,7 +25,7 @@ use tycho_storage::postgres::cache::CachedGateway;
 
 use crate::{
     extractor::{
-        bootstrap::{bootstrap, BootstrapConfig, SnapshotCheck},
+        bootstrap::{bootstrap, start_package_after, BootstrapConfig, SnapshotCheck},
         chain_state::ChainState,
         dynamic_contract_indexer::{
             dci::DynamicContractIndexer, hooks::hooks_dci_builder::UniswapV4HookDCIBuilder,
@@ -352,7 +352,7 @@ impl ExtractorFactory {
         let content = std::fs::read(&self.config.spkg)
             .with_context(|| format_err!("read package from file '{}'", self.config.spkg))
             .map_err(|err| ExtractionError::SubstreamsError(err.to_string()))?;
-        let spkg = Package::decode(content.as_ref())
+        let mut spkg = Package::decode(content.as_ref())
             .context("decode spkg")
             .map_err(|err| ExtractionError::SubstreamsError(err.to_string()))?;
 
@@ -362,9 +362,10 @@ impl ExtractorFactory {
                 .map_err(|err| ExtractionError::SubstreamsError(err.to_string()))?,
         );
 
+        let mut stream_start = None;
         if let Some(config) = &self.config.bootstrap {
             let source = config.build_source(&self.rpc_client)?;
-            if extractor
+            let (components, states) = if extractor
                 .get_last_processed_block()
                 .await
                 .is_none()
@@ -382,8 +383,14 @@ impl ExtractorFactory {
                     from,
                     config.block,
                 )
-                .await?;
-            }
+                .await?
+            } else {
+                extractor
+                    .indexed_snapshot(config.block)
+                    .await?
+            };
+            let params = source.stream_params(config.block, &components, &states)?;
+            stream_start = Some((config.block, params));
             let check_block = config.block + config.verify_after;
             if extractor
                 .get_last_processed_block()
@@ -398,6 +405,10 @@ impl ExtractorFactory {
                     })
                     .await;
             }
+        }
+
+        if let Some((block, params)) = &stream_start {
+            start_package_after(&mut spkg, *block, params)?;
         }
 
         // Determine the start block.

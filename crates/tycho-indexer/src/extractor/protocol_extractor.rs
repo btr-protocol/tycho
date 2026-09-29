@@ -30,7 +30,7 @@ use tycho_common::{
     },
     storage::{
         BlockIdentifier, ChainGateway, ContractStateGateway, EntryPointGateway,
-        ExtractionStateGateway, ProtocolGateway, StorageError,
+        ExtractionStateGateway, ProtocolGateway, StorageError, Version,
     },
     traits::TokenPreProcessor,
     Bytes,
@@ -431,6 +431,30 @@ where
             }
         }
         Ok(prior)
+    }
+
+    /// Returns the components of this extractor's protocol system and their indexed state at the
+    /// end of block `block`.
+    pub async fn indexed_snapshot(
+        &self,
+        block: u64,
+    ) -> Result<(Vec<ProtocolComponent>, Vec<ProtocolComponentState>), ExtractionError> {
+        let states = self
+            .gateway
+            .inner
+            .get_protocol_states_at(block)
+            .await?;
+        let ids: Vec<ComponentId> = states
+            .iter()
+            .map(|s| s.component_id.clone())
+            .collect();
+        let components = self
+            .protocol_cache
+            .get_protocol_components(&self.protocol_system, &ids)
+            .await?
+            .into_values()
+            .collect();
+        Ok((components, states))
     }
 
     /// Schedules `check` to run when the extractor processes its block.
@@ -2135,6 +2159,13 @@ pub trait ExtractorGateway: Send + Sync {
         component_ids: &[&'a str],
     ) -> Result<Vec<ProtocolComponentState>, StorageError>;
 
+    /// Returns the state of every component of this extractor's protocol system at the end of
+    /// block `block`.
+    async fn get_protocol_states_at(
+        &self,
+        block: u64,
+    ) -> Result<Vec<ProtocolComponentState>, StorageError>;
+
     /// Returns the protocol components identified by `component_ids`.
     ///
     /// Only components that exist in the store are returned: unknown ids are silently omitted
@@ -2486,6 +2517,25 @@ impl ExtractorGateway for ExtractorPgGateway {
     ) -> Result<Vec<ProtocolComponentState>, StorageError> {
         self.state_gateway
             .get_protocol_states(&self.chain, None, None, Some(component_ids), false, None)
+            .await
+            .map(|state_data| state_data.entity)
+    }
+
+    async fn get_protocol_states_at(
+        &self,
+        block: u64,
+    ) -> Result<Vec<ProtocolComponentState>, StorageError> {
+        let number = i64::try_from(block)
+            .map_err(|_| StorageError::Unexpected(format!("Block {block} exceeds i64")))?;
+        self.state_gateway
+            .get_protocol_states(
+                &self.chain,
+                Some(Version::from_block_number(self.chain, number)),
+                Some(self.name.clone()),
+                None,
+                true,
+                None,
+            )
             .await
             .map(|state_data| state_data.entity)
     }

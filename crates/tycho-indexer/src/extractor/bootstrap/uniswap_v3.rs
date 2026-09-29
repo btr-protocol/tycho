@@ -1,15 +1,22 @@
 //! Snapshot source for Uniswap V3 and its forks, matching the output of the
 //! `ethereum-uniswap-v3-logs-only` package.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use alloy::{
     primitives::{aliases::I24, Address, Bytes as AlloyBytes, I256, U256},
-    rpc::types::BlockId,
+    rpc::types::{
+        state::{AccountOverride, StateOverride},
+        BlockId, TransactionInput, TransactionRequest,
+    },
     sol,
     sol_types::{SolCall, SolEvent},
 };
 use async_trait::async_trait;
+use futures03::{stream, StreamExt};
 use num_bigint::BigInt;
 use serde::Deserialize;
 use tycho_common::{
@@ -46,6 +53,21 @@ sol! {
         bool initialized
     );
     function slot0() external view;
+
+    function scan(address pool, int24 tickSpacing, int16 fromWord, int16 toWord)
+        external
+        view
+        returns (int24[] memory ticks, int128[] memory liquidityNet);
+
+    struct PopulatedTick {
+        int24 tick;
+        int128 liquidityNet;
+        uint128 liquidityGross;
+    }
+    function getPopulatedTicksInWord(address pool, int16 tickBitmapIndex)
+        external
+        view
+        returns (PopulatedTick[] memory populatedTicks);
 }
 
 const MIN_TICK: i32 = -887272;
@@ -72,12 +94,16 @@ pub struct UniswapV3Config {
     pub protocol_type_name: String,
     #[serde(default)]
     pub protocol_fee_layout: ProtocolFeeLayout,
+    /// Uniswap's `TickLens`, used to read ticks when the RPC does not support state overrides.
+    #[serde(default)]
+    pub tick_lens: Option<Address>,
 }
 
 /// Reads Uniswap V3 pools: `slot0`, `liquidity`, every `tickBitmap` word, `ticks(i)` for each
 /// initialized tick, and the pool's token balances.
 pub struct UniswapV3Source {
     config: UniswapV3Config,
+    scanner_unsupported: AtomicBool,
     rpc: EthereumRpcClient,
     logs: Box<dyn LogSource>,
     calls_per_request: usize,
@@ -92,7 +118,14 @@ impl UniswapV3Source {
         calls_per_request: usize,
         concurrency: usize,
     ) -> Self {
-        Self { config, rpc, logs, calls_per_request, concurrency }
+        Self {
+            config,
+            scanner_unsupported: Default::default(),
+            rpc,
+            logs,
+            calls_per_request,
+            concurrency,
+        }
     }
 
     async fn multicall(
@@ -177,6 +210,56 @@ fn pool_address(component: &ProtocolComponent) -> Result<Address, ExtractionErro
 
 #[async_trait]
 impl SnapshotSource for UniswapV3Source {
+    /// Passes every pool with its tokens and tick to the package's `map_snapshot` module, which
+    /// seeds `store_pools` and `store_pool_current_tick`.
+    fn stream_params(
+        &self,
+        block: u64,
+        components: &[ProtocolComponent],
+        states: &[ProtocolComponentState],
+    ) -> Result<HashMap<String, String>, ExtractionError> {
+        let ticks: HashMap<&str, i32> = states
+            .iter()
+            .filter_map(|state| {
+                let tick = state.attributes.get("tick")?;
+                Some((
+                    state.component_id.as_str(),
+                    i32::try_from(BigInt::from_signed_bytes_be(tick)).ok()?,
+                ))
+            })
+            .collect();
+        let mut pools = components
+            .iter()
+            .map(|component| {
+                let tick = ticks
+                    .get(component.id.as_str())
+                    .ok_or_else(|| {
+                        ExtractionError::Setup(format!(
+                            "No tick for component {} at block {block}",
+                            component.id
+                        ))
+                    })?;
+                let [token0, token1] = &component.tokens[..] else {
+                    return Err(ExtractionError::Setup(format!(
+                        "Component {} does not have two tokens",
+                        component.id
+                    )));
+                };
+                Ok(format!(
+                    "{}:{}:{}:{tick}",
+                    component.id.trim_start_matches("0x"),
+                    hex::encode(token0),
+                    hex::encode(token1)
+                ))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        pools.sort();
+        Ok(HashMap::from([(
+            "map_snapshot".to_string(),
+            format!("block={}&pools={}", block + 1, pools.join(",")),
+        )]))
+    }
+
     async fn components(
         &self,
         from: u64,
@@ -232,7 +315,7 @@ impl SnapshotSource for UniswapV3Source {
             .collect::<Result<Vec<_>, ExtractionError>>()?;
 
         let mut calls = Vec::new();
-        for (pool, spacing, component) in &pools {
+        for (pool, _, component) in &pools {
             calls.push((*pool, slot0Call {}.abi_encode().into()));
             calls.push((*pool, liquidityCall {}.abi_encode().into()));
             for token in &component.tokens {
@@ -244,24 +327,23 @@ impl SnapshotSource for UniswapV3Source {
                         .into(),
                 ));
             }
-            for word in word_range(*spacing) {
-                calls.push((
-                    *pool,
-                    tickBitmapCall { wordPosition: word }
-                        .abi_encode()
-                        .into(),
-                ));
-            }
         }
         let mut results = self
             .multicall(calls, block)
             .await?
             .into_iter();
+        let ticks = self
+            .initialized_ticks(
+                &pools
+                    .iter()
+                    .map(|(pool, spacing, _)| (*pool, *spacing))
+                    .collect::<Vec<_>>(),
+                block,
+            )
+            .await?;
 
         let mut states = Vec::with_capacity(pools.len());
-        let mut tick_calls = Vec::new();
-        let mut tick_owners = Vec::new();
-        for (pool, spacing, component) in &pools {
+        for ((pool, _, component), pool_ticks) in pools.iter().zip(ticks) {
             let mut next = || {
                 results
                     .next()
@@ -276,21 +358,6 @@ impl SnapshotSource for UniswapV3Source {
                     .map_err(|e| decode_error("balanceOf", *pool, e))?;
                 balances.insert(token.clone(), Bytes::from(uint(balance).to_bytes_be().1));
             }
-            for word in word_range(*spacing) {
-                let bitmap = tickBitmapCall::abi_decode_returns(&next()?)
-                    .map_err(|e| decode_error("tickBitmap", *pool, e))?;
-                for tick in ticks_in_word(word, bitmap, *spacing) {
-                    let tick_arg =
-                        I24::try_from(tick).map_err(|e| decode_error("tickBitmap", *pool, e))?;
-                    tick_calls.push((
-                        *pool,
-                        ticksCall { tick: tick_arg }
-                            .abi_encode()
-                            .into(),
-                    ));
-                    tick_owners.push((states.len(), tick));
-                }
-            }
 
             let mut attributes = HashMap::from([
                 ("sqrt_price_x96".to_string(), signed(uint(slot0.sqrt_price_x96))),
@@ -298,29 +365,256 @@ impl SnapshotSource for UniswapV3Source {
                 ("liquidity".to_string(), signed(liquidity)),
             ]);
             attributes.extend(self.protocol_fees(slot0.fee_protocol));
-            states.push(ProtocolComponentState::new(&component.id, attributes, balances));
-        }
-
-        let tick_results = self
-            .multicall(tick_calls, block)
-            .await?;
-        for ((index, tick), data) in tick_owners
-            .into_iter()
-            .zip(tick_results)
-        {
-            let info = ticksCall::abi_decode_returns(&data)
-                .map_err(|e| decode_error("ticks", pools[index].0, e))?;
-            if info.liquidityNet != 0 {
-                states[index]
-                    .attributes
-                    .insert(format!("ticks/{tick}/net-liquidity"), signed(info.liquidityNet));
+            for (tick, net) in pool_ticks {
+                if net != 0 {
+                    attributes.insert(format!("ticks/{tick}/net-liquidity"), signed(net));
+                }
             }
+            states.push(ProtocolComponentState::new(&component.id, attributes, balances));
         }
         Ok(states)
     }
 }
 
+/// Throwaway address the tick scanner's code is injected at.
+const SCANNER_ADDRESS: Address =
+    alloy::primitives::address!("00000000000000000000000000000000005ca115");
+
+/// Runtime bytecode of `lens/TickScanner.sol`, built with `lens/foundry.toml`.
+const SCANNER_CODE: &str = include_str!("lens/TickScanner.bin");
+
+/// Bitmap words a single scanner call covers at first; a call that fails is split.
+const SCANNER_WORDS_PER_CALL: i32 = 1024;
+
 impl UniswapV3Source {
+    /// Returns each pool's initialized ticks with their net liquidity, in ascending order.
+    ///
+    /// Runs the tick scanner through `eth_call` state overrides: one call per 1024 bitmap words.
+    /// When the RPC rejects state overrides, falls back to reading every bitmap word through
+    /// Multicall3, then each initialized tick through the configured `TickLens`, or through
+    /// `ticks(i)` without one.
+    async fn initialized_ticks(
+        &self,
+        pools: &[(Address, i32)],
+        block: BlockId,
+    ) -> Result<Vec<Vec<(i32, i128)>>, ExtractionError> {
+        if !self
+            .scanner_unsupported
+            .load(Ordering::Relaxed)
+        {
+            if self.scanner_supported(block).await {
+                return self.scan_ticks(pools, block).await;
+            }
+            tracing::warn!("RPC does not run state overrides; reading ticks by bitmap word");
+            self.scanner_unsupported
+                .store(true, Ordering::Relaxed);
+        }
+        self.read_ticks(pools, block).await
+    }
+
+    fn scanner_overrides() -> Result<StateOverride, ExtractionError> {
+        let code = hex::decode(SCANNER_CODE.trim())
+            .map_err(|e| ExtractionError::Setup(format!("Invalid scanner code: {e}")))?;
+        Ok([(SCANNER_ADDRESS, AccountOverride { code: Some(code.into()), ..Default::default() })]
+            .into_iter()
+            .collect())
+    }
+
+    async fn scan(
+        &self,
+        pool: Address,
+        spacing: i32,
+        from: i16,
+        to: i16,
+        block: BlockId,
+    ) -> Result<scanReturn, ExtractionError> {
+        let data = scanCall {
+            pool,
+            tickSpacing: I24::try_from(spacing)
+                .map_err(|e| decode_error("tick spacing", pool, e))?,
+            fromWord: from,
+            toWord: to,
+        }
+        .abi_encode();
+        let tx = TransactionRequest::default()
+            .to(SCANNER_ADDRESS)
+            .input(TransactionInput::both(data.into()));
+        let output = self
+            .rpc
+            .eth_call_with_state_overrides(tx, block, Self::scanner_overrides()?)
+            .await
+            .map_err(|e| {
+                ExtractionError::Setup(format!("Tick scan of pool {pool} words {from}..={to}: {e}"))
+            })?;
+        scanCall::abi_decode_returns(&output).map_err(|e| decode_error("tick scan", pool, e))
+    }
+
+    /// Whether the RPC runs the injected scanner: an empty scan must return two empty arrays. An
+    /// RPC that ignores the override returns no data, and one that rejects it returns an error.
+    async fn scanner_supported(&self, block: BlockId) -> bool {
+        match self
+            .scan(Address::ZERO, 1, 0, -1, block)
+            .await
+        {
+            Ok(empty) => empty.ticks.is_empty(),
+            Err(err) => {
+                tracing::debug!(%err, "Tick scanner probe failed");
+                false
+            }
+        }
+    }
+
+    /// Scans each pool's bitmap words in chunks of `SCANNER_WORDS_PER_CALL`. A chunk that fails,
+    /// for example by exceeding the RPC's gas cap on a dense pool, is split in half and retried;
+    /// a single word that still fails is an error.
+    async fn scan_ticks(
+        &self,
+        pools: &[(Address, i32)],
+        block: BlockId,
+    ) -> Result<Vec<Vec<(i32, i128)>>, ExtractionError> {
+        let mut ranges = Vec::new();
+        for (index, (_, spacing)) in pools.iter().enumerate() {
+            let words = word_range(*spacing);
+            let (first, last) = (i32::from(*words.start()), i32::from(*words.end()));
+            for from in (first..=last).step_by(SCANNER_WORDS_PER_CALL as usize) {
+                ranges.push((index, from, last.min(from + SCANNER_WORDS_PER_CALL - 1)));
+            }
+        }
+        let mut ticks: Vec<Vec<(i32, i32, i128)>> = vec![Vec::new(); pools.len()];
+        while !ranges.is_empty() {
+            let results: Vec<_> = stream::iter(std::mem::take(&mut ranges))
+                .map(|(index, from, to)| async move {
+                    let (pool, spacing) = pools[index];
+                    (
+                        index,
+                        from,
+                        to,
+                        self.scan(pool, spacing, from as i16, to as i16, block)
+                            .await,
+                    )
+                })
+                .buffer_unordered(self.concurrency)
+                .collect()
+                .await;
+            for (index, from, to, result) in results {
+                match result {
+                    Ok(scanned) => ticks[index].extend(
+                        scanned
+                            .ticks
+                            .into_iter()
+                            .map(|tick| (from, tick.as_i32()))
+                            .zip(scanned.liquidityNet)
+                            .map(|((from, tick), net)| (from, tick, net)),
+                    ),
+                    Err(err) if from == to => return Err(err),
+                    Err(err) => {
+                        tracing::debug!(%err, "Splitting tick scan range");
+                        let mid = from + (to - from) / 2;
+                        ranges.extend([(index, from, mid), (index, mid + 1, to)]);
+                    }
+                }
+            }
+        }
+        Ok(ticks
+            .into_iter()
+            .map(|mut pool_ticks| {
+                pool_ticks.sort_by_key(|(_, tick, _)| *tick);
+                pool_ticks
+                    .into_iter()
+                    .map(|(_, tick, net)| (tick, net))
+                    .collect()
+            })
+            .collect())
+    }
+
+    /// Reads every bitmap word, then the net liquidity of each initialized tick.
+    async fn read_ticks(
+        &self,
+        pools: &[(Address, i32)],
+        block: BlockId,
+    ) -> Result<Vec<Vec<(i32, i128)>>, ExtractionError> {
+        let mut calls = Vec::new();
+        for (pool, spacing) in pools {
+            for word in word_range(*spacing) {
+                calls.push((
+                    *pool,
+                    tickBitmapCall { wordPosition: word }
+                        .abi_encode()
+                        .into(),
+                ));
+            }
+        }
+        let mut bitmaps = self
+            .multicall(calls, block)
+            .await?
+            .into_iter();
+        let mut words = Vec::new();
+        for (index, (pool, spacing)) in pools.iter().enumerate() {
+            for word in word_range(*spacing) {
+                let data = bitmaps
+                    .next()
+                    .ok_or_else(|| decode_error("multicall", *pool, "missing result"))?;
+                let bitmap = tickBitmapCall::abi_decode_returns(&data)
+                    .map_err(|e| decode_error("tickBitmap", *pool, e))?;
+                if !bitmap.is_zero() {
+                    words.push((index, word, bitmap));
+                }
+            }
+        }
+
+        let mut ticks = vec![Vec::new(); pools.len()];
+        if let Some(lens) = self.config.tick_lens {
+            let calls = words
+                .iter()
+                .map(|(index, word, _)| {
+                    let call = getPopulatedTicksInWordCall {
+                        pool: pools[*index].0,
+                        tickBitmapIndex: *word,
+                    };
+                    (lens, call.abi_encode().into())
+                })
+                .collect();
+            let results = self.multicall(calls, block).await?;
+            for ((index, _, _), data) in words.iter().zip(results) {
+                let mut populated = getPopulatedTicksInWordCall::abi_decode_returns(&data)
+                    .map_err(|e| decode_error("getPopulatedTicksInWord", pools[*index].0, e))?;
+                populated.sort_by_key(|t| t.tick);
+                ticks[*index].extend(
+                    populated
+                        .into_iter()
+                        .map(|t| (t.tick.as_i32(), t.liquidityNet)),
+                );
+            }
+            return Ok(ticks);
+        }
+
+        let mut owners = Vec::new();
+        let mut calls = Vec::new();
+        for (index, word, bitmap) in words {
+            let (pool, spacing) = pools[index];
+            for tick in ticks_in_word(word, bitmap, spacing) {
+                let tick_arg =
+                    I24::try_from(tick).map_err(|e| decode_error("tickBitmap", pool, e))?;
+                calls.push((
+                    pool,
+                    ticksCall { tick: tick_arg }
+                        .abi_encode()
+                        .into(),
+                ));
+                owners.push((index, tick));
+            }
+        }
+        for ((index, tick), data) in owners
+            .into_iter()
+            .zip(self.multicall(calls, block).await?)
+        {
+            let info = ticksCall::abi_decode_returns(&data)
+                .map_err(|e| decode_error("ticks", pools[index].0, e))?;
+            ticks[index].push((tick, info.liquidityNet));
+        }
+        Ok(ticks)
+    }
+
     fn protocol_fees(&self, fee_protocol: u32) -> Vec<(String, Bytes)> {
         match self.config.protocol_fee_layout {
             ProtocolFeeLayout::Uniswap if fee_protocol == 0 => vec![],
@@ -502,6 +796,7 @@ mod tests {
                 factory,
                 protocol_type_name: "uniswap_v3_pool".to_string(),
                 protocol_fee_layout: ProtocolFeeLayout::Uniswap,
+                tick_lens: None,
             },
             rpc.clone(),
             Box::new(RpcLogSource::new(logs_rpc.clone(), range, 4)),
@@ -579,13 +874,19 @@ mod tests {
             logs_in_range(&logs_rpc, Filter::new().address(pools.clone()), start + 1, end, range)
                 .await;
 
+        let start_states = source
+            .state(&components, start.into())
+            .await
+            .unwrap();
+        let params = source
+            .stream_params(start, &components, &start_states)
+            .unwrap();
         let bootstrap_case = case_json(
             "bootstrap",
+            start,
+            &params["map_snapshot"],
             &components,
-            &source
-                .state(&components, start.into())
-                .await
-                .unwrap(),
+            &start_states,
             &pool_logs,
             &source
                 .state(&components, end.into())
@@ -633,7 +934,15 @@ mod tests {
                     .state(&models, end.into())
                     .await
                     .unwrap();
-                replay_case = Some(case_json("replay", &models, &[empty], &logs, &end_state));
+                replay_case = Some(case_json(
+                    "replay",
+                    creation - 1,
+                    "",
+                    &models,
+                    &[empty],
+                    &logs,
+                    &end_state,
+                ));
                 break;
             }
         }
@@ -658,8 +967,11 @@ mod tests {
         .unwrap();
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn case_json(
         name: &str,
+        start_block: u64,
+        snapshot_params: &str,
         components: &[ProtocolComponent],
         start: &[ProtocolComponentState],
         logs: &[Log],
@@ -670,6 +982,8 @@ mod tests {
         }
         serde_json::json!({
             "name": name,
+            "start_block": start_block,
+            "snapshot_params": snapshot_params,
             "pools": components
                 .iter()
                 .map(|c| serde_json::json!({
@@ -688,5 +1002,167 @@ mod tests {
                 .map(|s| (s.component_id.clone(), hex_state(s)))
                 .collect::<serde_json::Map<_, _>>(),
         })
+    }
+
+    #[test]
+    fn test_stream_params_lists_sorted_pools_with_ticks() {
+        let rpc = EthereumRpcClient::new("http://127.0.0.1:1").unwrap();
+        let source = UniswapV3Source::new(
+            UniswapV3Config {
+                factory: Address::ZERO,
+                protocol_type_name: String::new(),
+                protocol_fee_layout: ProtocolFeeLayout::Uniswap,
+                tick_lens: None,
+            },
+            rpc.clone(),
+            Box::new(RpcLogSource::new(rpc, 1, 1)),
+            1,
+            1,
+        );
+        let component = |id: &str| ProtocolComponent {
+            id: id.to_string(),
+            tokens: vec![Bytes::from(vec![0x0a]), Bytes::from(vec![0x0b])],
+            ..Default::default()
+        };
+        let state = |id: &str, tick: i32| {
+            ProtocolComponentState::new(
+                id,
+                HashMap::from([("tick".to_string(), signed(tick))]),
+                HashMap::new(),
+            )
+        };
+        let params = source
+            .stream_params(
+                9,
+                &[component("0xbb"), component("0xaa")],
+                &[state("0xaa", -3), state("0xbb", 70000)],
+            )
+            .unwrap();
+        assert_eq!(params["map_snapshot"], "block=10&pools=aa:0a:0b:-3,bb:0a:0b:70000");
+        assert!(source
+            .stream_params(9, &[component("0xcc")], &[])
+            .is_err());
+    }
+
+    #[test]
+    #[ignore = "Requires forge"]
+    fn test_scanner_bytecode_matches_source() {
+        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/src/extractor/bootstrap/lens");
+        let out = std::env::temp_dir().join("tycho-tick-scanner");
+        let status = std::process::Command::new("forge")
+            .args(["build", "--root", root, "--out"])
+            .arg(&out)
+            .status()
+            .expect("forge");
+        assert!(status.success());
+        let artifact: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(out.join("TickScanner.sol/TickScanner.json")).unwrap(),
+        )
+        .unwrap();
+        let built = artifact["deployedBytecode"]["object"]
+            .as_str()
+            .unwrap()
+            .trim_start_matches("0x");
+        assert_eq!(built, SCANNER_CODE.trim(), "rebuild lens/TickScanner.bin from its source");
+        let status = std::process::Command::new("forge")
+            .args(["test", "--root", root, "--out"])
+            .arg(&out)
+            .status()
+            .expect("forge");
+        assert!(status.success(), "lens/test/TickScanner.t.sol failed");
+    }
+
+    /// Reads the ticks of the replay fixture's pools, plus the tick-spacing-1 pool in `POOL_TS1`,
+    /// with the scanner and with per-tick reads, requires both to match, and prints the calls and
+    /// time each path takes.
+    #[tokio::test]
+    #[ignore = "Requires RPC_URL; POOL_TS1 is optional"]
+    async fn test_scanner_matches_per_tick_reads() {
+        let rpc = EthereumRpcClient::new(&std::env::var("RPC_URL").expect("RPC_URL"))
+            .unwrap()
+            .with_retry(tycho_ethereum::rpc::config::RPCRetryConfig::new(8, 500, 30_000));
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../../../protocols/substreams/ethereum-uniswap-v3-logs-only/tests/fixtures/replay.json"
+        ))
+        .unwrap();
+        let mut addresses: Vec<Address> = fixture["cases"][0]["pools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| {
+                p["address"]
+                    .as_str()
+                    .unwrap()
+                    .parse()
+                    .unwrap()
+            })
+            .collect();
+        if let Ok(pool) = std::env::var("POOL_TS1") {
+            addresses.push(pool.parse().unwrap());
+        }
+        let block = BlockId::number(rpc.get_block_number().await.unwrap() - 10);
+        let spacings = rpc
+            .multicall(
+                &addresses
+                    .iter()
+                    .map(|pool| (*pool, tickSpacingCall {}.abi_encode().into()))
+                    .collect::<Vec<_>>(),
+                block,
+                200,
+                4,
+            )
+            .await
+            .unwrap();
+        let pools: Vec<(Address, i32)> = addresses
+            .iter()
+            .zip(spacings)
+            .map(|(pool, data)| {
+                (
+                    *pool,
+                    tickSpacingCall::abi_decode_returns(&data)
+                        .unwrap()
+                        .as_i32(),
+                )
+            })
+            .collect();
+        let source = UniswapV3Source::new(
+            UniswapV3Config {
+                factory: Address::ZERO,
+                protocol_type_name: String::new(),
+                protocol_fee_layout: ProtocolFeeLayout::Uniswap,
+                tick_lens: None,
+            },
+            rpc.clone(),
+            Box::new(RpcLogSource::new(rpc.clone(), 100, 4)),
+            200,
+            4,
+        );
+        for (pool, spacing) in &pools {
+            let words = word_range(*spacing).count();
+            let started = std::time::Instant::now();
+            let Ok(scanned) = source
+                .scan_ticks(&[(*pool, *spacing)], block)
+                .await
+            else {
+                panic!("the RPC rejected the scanner override");
+            };
+            let scan_time = started.elapsed();
+            let started = std::time::Instant::now();
+            let read = source
+                .read_ticks(&[(*pool, *spacing)], block)
+                .await
+                .unwrap();
+            let read_time = started.elapsed();
+            assert_eq!(scanned, read, "pool {pool}");
+            let ticks = read[0].len();
+            let scan_calls = words.div_ceil(SCANNER_WORDS_PER_CALL as usize);
+            let read_calls = words.div_ceil(200) + ticks.div_ceil(200);
+            println!(
+                "pool {pool} spacing {spacing}: {ticks} ticks over {words} words; scanner \
+                 {scan_calls} eth_call in {scan_time:?}; per-tick {} calls in {read_calls} \
+                 eth_call in {read_time:?}",
+                words + ticks
+            );
+        }
     }
 }

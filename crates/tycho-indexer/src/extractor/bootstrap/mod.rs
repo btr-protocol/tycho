@@ -31,7 +31,7 @@ use crate::{
     },
     pb::sf::substreams::{
         rpc::v2::{BlockScopedData, MapModuleOutput},
-        v1::Clock,
+        v1::{module::input as module_input, Clock, Package},
     },
 };
 
@@ -49,6 +49,16 @@ pub trait SnapshotSource: Send + Sync {
         from: u64,
         to: u64,
     ) -> Result<Vec<pb::ProtocolComponent>, ExtractionError>;
+
+    /// Returns the module parameters that let the protocol's package stream from `block + 1`
+    /// without processing earlier blocks, given the snapshot at `block`. A package whose modules
+    /// hold no state built from history needs none.
+    fn stream_params(
+        &self,
+        block: u64,
+        components: &[ProtocolComponent],
+        states: &[ProtocolComponentState],
+    ) -> Result<HashMap<String, String>, ExtractionError>;
 
     /// Returns the attributes and balances of `components` at `block`, as the protocol's package
     /// would have accumulated them by then.
@@ -168,7 +178,7 @@ pub async fn bootstrap(
     protocol_types: &HashMap<String, ProtocolType>,
     from: u64,
     block: u64,
-) -> Result<(), ExtractionError> {
+) -> Result<(Vec<ProtocolComponent>, Vec<ProtocolComponentState>), ExtractionError> {
     let header = rpc
         .eth_get_block_by_number(block.into())
         .await
@@ -278,6 +288,45 @@ pub async fn bootstrap(
         })
         .await?;
     tracing::info!(block, "Snapshot written; streaming from the next block");
+    Ok((components, states))
+}
+
+/// Makes `package` stream from `block + 1` on top of a snapshot at `block`: every module starts
+/// at `block + 1`, so no store replays earlier blocks, and each module named in `params` gets that
+/// value as its `params` input.
+///
+/// Errors if a module named in `params` is missing or takes no parameters.
+pub fn start_package_after(
+    package: &mut Package,
+    block: u64,
+    params: &HashMap<String, String>,
+) -> Result<(), ExtractionError> {
+    let modules = package
+        .modules
+        .as_mut()
+        .ok_or_else(|| ExtractionError::Setup("Package has no modules".to_string()))?;
+    for module in &mut modules.modules {
+        module.initial_block = module.initial_block.max(block + 1);
+    }
+    for (name, value) in params {
+        let input = modules
+            .modules
+            .iter_mut()
+            .find(|module| &module.name == name)
+            .and_then(|module| {
+                module
+                    .inputs
+                    .iter_mut()
+                    .find_map(|input| match &mut input.input {
+                        Some(module_input::Input::Params(params)) => Some(params),
+                        _ => None,
+                    })
+            })
+            .ok_or_else(|| {
+                ExtractionError::Setup(format!("Package module {name} takes no parameters"))
+            })?;
+        input.value = value.clone();
+    }
     Ok(())
 }
 
@@ -369,6 +418,45 @@ mod tests {
                 .collect(),
             HashMap::from([(Bytes::from(vec![1]), Bytes::from(balance.to_be_bytes().to_vec()))]),
         )
+    }
+
+    #[test]
+    fn test_start_package_after_moves_modules_and_sets_params() {
+        use crate::pb::sf::substreams::v1::{module, Module, Modules};
+        let module = |name: &str, initial_block: u64, params: bool| Module {
+            name: name.to_string(),
+            initial_block,
+            inputs: params
+                .then(|| module::Input {
+                    input: Some(module_input::Input::Params(module::input::Params::default())),
+                })
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let mut package = Package {
+            modules: Some(Modules {
+                modules: vec![module("seed", 10, true), module("late", 500, false)],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let params = HashMap::from([("seed".to_string(), "block=101".to_string())]);
+
+        start_package_after(&mut package, 100, &params).unwrap();
+
+        let modules = &package
+            .modules
+            .as_ref()
+            .unwrap()
+            .modules;
+        assert_eq!((modules[0].initial_block, modules[1].initial_block), (101, 500));
+        assert!(matches!(
+            &modules[0].inputs[0].input,
+            Some(module_input::Input::Params(p)) if p.value == "block=101"
+        ));
+        let bad = HashMap::from([("late".to_string(), String::new())]);
+        assert!(start_package_after(&mut package, 100, &bad).is_err());
     }
 
     #[test]
