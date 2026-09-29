@@ -67,3 +67,12 @@ pub fn map_protocol_changes(
 ```
 
 Each step ensures accurate tracking of balance changes, making it possible to reflect absolute values for components and tokens reliably.
+
+### Emitting deltas instead of absolute values
+
+An additive store only holds correct absolute values when the package runs from the protocol's deployment block. To let the indexer do the addition instead, emit the relative change with `change: ChangeType::Delta.into()`:
+
+- On a `BalanceChange`, `balance` holds the signed big-endian delta. The indexer adds it to the stored balance, a missing balance counting as zero, and fails if the result is negative.
+- On an `Attribute`, `value` holds the signed big-endian delta. The indexer adds it to the value last stored for that attribute, which it reads as a signed big-endian integer. It creates the attribute when no value exists and keeps a result of zero instead of deleting it.
+
+The indexer resolves every delta into an absolute value before it stores or broadcasts the change, so consumers always receive absolute values. It fails when a delta targets a component that it never indexed. `TransactionChangesBuilder` adds deltas of one transaction for the same key together. Every value written to an attribute that receives deltas must be a signed big-endian integer, including its absolute updates.
