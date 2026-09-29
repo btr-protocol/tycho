@@ -202,7 +202,7 @@ where
 
     /// Iterates the buffered history newest to oldest: buffered blocks first, then
     /// retained committing blocks.
-    fn history(&self) -> impl Iterator<Item = &B> + '_ {
+    pub(crate) fn history(&self) -> impl Iterator<Item = &B> + '_ {
         self.block_messages.iter().rev().chain(
             self.committing_blocks
                 .iter()

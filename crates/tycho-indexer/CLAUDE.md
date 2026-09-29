@@ -19,6 +19,10 @@ extractor/
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
   protocol_cache.rs         ProtocolMemoryCache — in-process token/component metadata cache
+  bootstrap/                Start from a state snapshot at a finalized block (`bootstrap` extractor option)
+    mod.rs                  SnapshotSource trait, config, block-N snapshot write, verification compare
+    logs.rs                 LogSource trait: eth_getLogs and HyperSync implementations
+    uniswap_v3.rs           Uniswap V3 / PancakeSwap V3 SnapshotSource (Multicall3 reads)
   chain_state.rs            ChainState — tracks current tip and finality horizon
   deltas.rs                 Resolves CHANGE_TYPE_DELTA attributes and balances into absolute values
   u256_num.rs               U256 numeric utilities
@@ -145,6 +149,18 @@ extend the window's chain is an error that ends the pump and the process: only t
 replay can refill the window. On `ExtractorRestarted` the pump folds the window's committed
 blocks into the sink and clears it; the restarted extractor replays everything above its
 database cursor.
+
+## Snapshot bootstrap
+
+With `bootstrap: { block: N, source: {...} }` on an extractor and no cursor in the DB,
+`ExtractorFactory::build_runner` enumerates components with the protocol's `SnapshotSource`
+(factory logs over HyperSync when `hypersync_url` and `HYPERSYNC_API_KEY` are set, `eth_getLogs`
+otherwise), reads their state at N with Multicall3, and feeds it to the extractor as block N, so
+token loading, buffering and the DB write follow the normal path. The stream then starts at N+1.
+While the extractor is below N + `verify_after`, it arms a `SnapshotCheck`: at that block it
+compares the indexed state of the most recently changed components with on-chain reads and fails
+with `SnapshotVerification` on any difference. Attributes must match exactly; indexed balances
+may trail `balanceOf` by dust, since packages derive them from events.
 
 ## Persistence
 

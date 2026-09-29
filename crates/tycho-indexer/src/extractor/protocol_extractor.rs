@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use alloy::{primitives::B256, rpc::types::BlockId};
 use async_trait::async_trait;
 use chrono::{Duration, NaiveDateTime};
 use deepsize::DeepSizeOf;
@@ -39,6 +40,7 @@ use tycho_storage::postgres::cache::CachedGateway;
 
 use crate::{
     extractor::{
+        bootstrap::{compare_states, SnapshotCheck},
         chain_state::ChainState,
         deltas::{self, DeltaKeys, PriorState},
         models::BlockChanges,
@@ -93,6 +95,7 @@ pub struct ProtocolExtractor<G, T, E> {
     reorg_buffer: Mutex<ReorgBuffer<BlockUpdateWithCursor<BlockChanges>>>,
     partial_block_buffer: Mutex<PartialBlockBuffer>,
     dci_plugin: Option<Arc<Mutex<E>>>,
+    snapshot_check: Mutex<Option<SnapshotCheck>>,
 }
 
 impl<G, T, E> ProtocolExtractor<G, T, E>
@@ -158,6 +161,7 @@ where
                     reorg_buffer: Mutex::new(ReorgBuffer::new()),
                     partial_block_buffer: Mutex::new(None),
                     dci_plugin,
+                    snapshot_check: Mutex::new(None),
                 }
             }
             Ok((cursor, block_hash)) => {
@@ -203,6 +207,7 @@ where
                     reorg_buffer: Mutex::new(ReorgBuffer::new()),
                     partial_block_buffer: Mutex::new(None),
                     dci_plugin,
+                    snapshot_check: Mutex::new(None),
                 }
             }
             Err(err) => return Err(ExtractionError::Setup(err.to_string())),
@@ -426,6 +431,143 @@ where
             }
         }
         Ok(prior)
+    }
+
+    /// Schedules `check` to run when the extractor processes its block.
+    pub async fn arm_snapshot_check(&self, check: SnapshotCheck) {
+        *self.snapshot_check.lock().await = Some(check);
+    }
+
+    /// Runs the armed snapshot check once `block` reaches its block: compares the indexed state
+    /// of the components most recently changed in the reorg buffer with the snapshot source's
+    /// on-chain reads at `block`'s hash. The check stays armed while no component changed or
+    /// the read fails, for example because `block` was reorged out; a difference is an error.
+    async fn run_snapshot_check(&self, block: &Block) -> Result<(), ExtractionError> {
+        let Some(check) = self
+            .snapshot_check
+            .lock()
+            .await
+            .clone()
+            .filter(|check| block.number >= check.block)
+        else {
+            return Ok(());
+        };
+
+        let reorg_buffer = self.reorg_buffer.lock().await;
+        let mut ids: Vec<ComponentId> = Vec::new();
+        let mut keys = DeltaKeys::default();
+        for entry in reorg_buffer.history() {
+            for tx in entry
+                .block_update()
+                .txs_with_update
+                .iter()
+                .rev()
+            {
+                for (id, delta) in &tx.state_updates {
+                    if !ids.contains(id) {
+                        if ids.len() == check.sample {
+                            continue;
+                        }
+                        ids.push(id.clone());
+                    }
+                    keys.attributes.extend(
+                        delta
+                            .updated_attributes
+                            .keys()
+                            .chain(&delta.deleted_attributes)
+                            .map(|attr| (id.clone(), attr.clone())),
+                    );
+                }
+            }
+        }
+        if ids.is_empty() {
+            warn!(
+                block = block.number,
+                "No component changed since the snapshot; nothing to verify"
+            );
+            return Ok(());
+        }
+        let components: Vec<ProtocolComponent> = self
+            .protocol_cache
+            .get_protocol_components(&self.protocol_system, &ids)
+            .await?
+            .into_values()
+            .collect();
+        let block_id = BlockId::hash(B256::from_slice(&block.hash));
+        let expected = match check
+            .source
+            .state(&components, block_id)
+            .await
+        {
+            Ok(expected) => expected,
+            Err(err) => {
+                warn!(block = block.number, %err, "Snapshot check read failed; retrying on the next block");
+                return Ok(());
+            }
+        };
+        for state in self
+            .gateway
+            .inner
+            .get_protocol_states(
+                &ids.iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            )
+            .await?
+            .iter()
+            .chain(&expected)
+        {
+            keys.attributes.extend(
+                state
+                    .attributes
+                    .keys()
+                    .map(|attr| (state.component_id.clone(), attr.clone())),
+            );
+        }
+        keys.attributes
+            .retain(|(id, _)| ids.contains(id));
+        for component in &components {
+            keys.balances.extend(
+                component
+                    .tokens
+                    .iter()
+                    .map(|token| (component.id.clone(), token.clone())),
+            );
+        }
+        let prior = self
+            .prior_state(&reorg_buffer, None, &keys)
+            .await?;
+        drop(reorg_buffer);
+
+        let mut indexed: HashMap<ComponentId, ProtocolComponentState> = HashMap::new();
+        for ((id, attr), value) in prior.attributes {
+            indexed
+                .entry(id.clone())
+                .or_insert_with(|| ProtocolComponentState::new(&id, HashMap::new(), HashMap::new()))
+                .attributes
+                .insert(attr, value);
+        }
+        for ((id, token), value) in prior.balances {
+            indexed
+                .entry(id.clone())
+                .or_insert_with(|| ProtocolComponentState::new(&id, HashMap::new(), HashMap::new()))
+                .balances
+                .insert(token, value);
+        }
+        let mismatches = compare_states(&expected, &indexed);
+        if !mismatches.is_empty() {
+            error!(block = block.number, ?mismatches, "Indexed state differs from the chain");
+            return Err(ExtractionError::SnapshotVerification(format!(
+                "{} differences at block {} for {} components, first: {}",
+                mismatches.len(),
+                block.number,
+                ids.len(),
+                mismatches[..mismatches.len().min(5)].join("; ")
+            )));
+        }
+        info!(block = block.number, components = ids.len(), "Snapshot verified against the chain");
+        *self.snapshot_check.lock().await = None;
+        Ok(())
     }
 
     async fn is_first_message(&self) -> bool {
@@ -1049,6 +1191,9 @@ where
 
         self.update_last_processed_block(msg.block.clone())
             .await;
+
+        self.run_snapshot_check(&msg.block)
+            .await?;
 
         self.periodically_report_metrics(&msg, is_syncing)
             .await;

@@ -34,6 +34,7 @@ use crate::{
     },
 };
 
+pub mod bootstrap;
 pub mod chain_state;
 mod deltas;
 mod dynamic_contract_indexer;
@@ -81,6 +82,8 @@ pub enum ExtractionError {
     AccountExtractionError(String),
     #[error("DCI cache error: {0}")]
     DCICacheError(#[from] DCICacheError),
+    #[error("Snapshot verification failed: {0}")]
+    SnapshotVerification(String),
 }
 
 impl ExtractionError {
@@ -101,6 +104,7 @@ impl ExtractionError {
             Self::TracingError(_) => "tracing",
             Self::AccountExtractionError(_) => "account_extraction",
             Self::DCICacheError(_) => "dci_cache",
+            Self::SnapshotVerification(_) => "snapshot_verification",
         }
     }
 }
