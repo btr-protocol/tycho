@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.9.0
+
+### Added
+
+- `ChangeType::Delta`: an attribute or balance change whose value is a signed big-endian amount the
+  indexer adds to the stored value. `BalanceChange` gains a `change` field to carry it; absolute
+  balances keep the default.
+- `TransactionChangesBuilder` adds a delta to an earlier change of the same attribute or balance in
+  the transaction instead of replacing it.
+
 ## 0.8.1
 
 ### Fixed
