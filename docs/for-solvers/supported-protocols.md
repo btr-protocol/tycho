@@ -29,6 +29,12 @@ Currently, Tycho supports the following protocols:
 <tr><td><code>rocketpool</code></td><td>Native (<code>RocketpoolState</code>)</td><td>-</td><td>Ethereum</td><td>Note: the DepositPool was recently updated to v1.4. This new version is supported by tycho_simulation <a href="https://github.com/propeller-heads/tycho-simulation/releases/tag/0.248.0" target="_blank" rel="noopener noreferrer">> v0.248.0</a> and above.</td></tr>
 <tr><td><code>fluid_v1</code></td><td>Native (<code>FluidV1</code>)<br>[DCI indexed]</td><td>-</td><td>Ethereum</td><td>Note: paused pools are still indexed. To filter them out use <code>fluid_v1_paused_pools_filter</code>.</td></tr>
 <tr><td><code>erc4626</code></td><td>Native (<code>ERC4626State</code>)<br>[DCI indexed]</td><td>-</td><td>Ethereum</td><td>A few vaults are unsupported. Use <code>erc4626_filter</code></td></tr>
+<tr><td><code>vm:balancer_v3</code></td><td>Hybrid (<code>BalancerV3State</code>)<br>[DCI indexed]</td><td>-</td><td>Ethereum</td><td>Only weighted, stable and reCLAMM pools are supported. Pools with a swap hook and Gyro, QuantAMM and LBP pools are unsupported. The decoder rejects them.</td></tr>
+<tr><td><code>vm:liquidityparty</code></td><td>VM (<code>EVMPoolState</code>)</td><td>-</td><td>Ethereum</td><td>A swap on a killed pool reverts. Use <code>liquidityparty_killed_pools_filter</code>.</td></tr>
+<tr><td><code>ring_swap_v2</code></td><td>Native (<code>RingSwapV2State</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
+<tr><td><code>sky</code></td><td>Native (<code>SkyState</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
+<tr><td><code>lido_v4</code></td><td>Native (<code>LidoV4State</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
+<tr><td><code>etherfi</code></td><td>Native (<code>EtherfiState</code>)</td><td>-</td><td>Ethereum</td><td></td></tr>
 </tbody>
 </table>
 
@@ -69,6 +75,12 @@ fn register_exchanges(
                 .exchange::<FluidV1>("fluid_v1", tvl_filter.clone(), Some(fluid_v1_paused_pools_filter))
                 .exchange::<ERC4626State>("erc4626", tvl_filter.clone(), Some(erc4626_filter))
                 .exchange::<RocketpoolState>("rocketpool", tvl_filter.clone(), None)
+                .exchange::<BalancerV3State>("vm:balancer_v3", tvl_filter.clone(), None)
+                .exchange::<EVMPoolState<PreCachedDB>>("vm:liquidityparty", tvl_filter.clone(), Some(liquidityparty_killed_pools_filter))
+                .exchange::<RingSwapV2State>("ring_swap_v2", tvl_filter.clone(), None)
+                .exchange::<SkyState>("sky", tvl_filter.clone(), None)
+                .exchange::<LidoV4State>("lido_v4", tvl_filter.clone(), None)
+                .exchange::<EtherfiState>("etherfi", tvl_filter.clone(), None)
         }
         Chain::Base => {
             builder = builder
