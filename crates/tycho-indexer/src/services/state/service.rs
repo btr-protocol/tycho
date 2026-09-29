@@ -27,16 +27,13 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex},
 };
 
 use thiserror::Error;
 use tycho_common::{
     dto::{self, PaginationResponse},
-    models::{
-        blockchain::Block, contract::Account, protocol::ProtocolComponentState, ChangeType,
-        PaginationParams,
-    },
+    models::{contract::Account, protocol::ProtocolComponentState, ChangeType, PaginationParams},
     storage::{BlockOrTimestamp, StorageError, WriteTimestamp},
     Bytes,
 };
@@ -141,12 +138,10 @@ impl StateService {
             .collect();
         // Resolve the version and copy the window changes for the page under one window lock, so
         // both see the same blocks.
-        let (window, block) = self.resolve(&request.protocol_system, &request.version)?;
-        let window_changes = window
-            .account_changes(&page, block.number)
-            .map_err(RpcError::from)?;
-        drop(window);
-        let version = WriteTimestamp::from(&block);
+        let (version, window_changes) =
+            self.read_window(&request.protocol_system, &request.version, |window, upto| {
+                window.account_changes(&page, upto)
+            })?;
 
         // Copy the cached entries under the cache read lock; folds wait until it is released.
         let mut entries = Vec::with_capacity(page.len());
@@ -245,12 +240,10 @@ impl StateService {
         let system = &request.protocol_system;
         // Resolve the version and copy the window changes for the page under one window lock, so
         // both see the same blocks.
-        let (window, block) = self.resolve(system, &request.version)?;
-        let window_changes = window
-            .component_changes(&page, block.number)
-            .map_err(RpcError::from)?;
-        drop(window);
-        let version = WriteTimestamp::from(&block);
+        let (version, window_changes) =
+            self.read_window(system, &request.version, |window, upto| {
+                window.component_changes(&page, upto)
+            })?;
 
         // Copy the cached entries under the cache read lock; folds wait until it is released.
         let mut entries = Vec::with_capacity(page.len());
@@ -317,14 +310,16 @@ impl StateService {
         ))
     }
 
-    /// Locks the window of `protocol_system` and resolves `version` in it. Returns the locked
-    /// window with the resolved block, so the caller can read the window's changes up to that
-    /// block before a new block arrives; the pump waits until the guard is dropped.
-    fn resolve(
+    /// Resolves `version` in the window of `protocol_system` and runs `read` on that window, up
+    /// to the resolved block, under one lock: a fold or revert in between could otherwise remove
+    /// the resolved block from the window. Returns the resolved block's write timestamp with what
+    /// `read` returned; the lock is released before this returns.
+    fn read_window<T>(
         &self,
         protocol_system: &str,
         version: &dto::VersionParam,
-    ) -> Result<(MutexGuard<'_, DeltaWindow>, Block), StateServiceError> {
+        read: impl FnOnce(&DeltaWindow, u64) -> Result<T, StorageError>,
+    ) -> Result<(WriteTimestamp, T), StateServiceError> {
         let window = self
             .windows
             .get(protocol_system)
@@ -335,15 +330,19 @@ impl StateService {
         let window = window
             .lock()
             .map_err(|err| RpcError::Unknown(format!("Delta window lock poisoned: {err}")))?;
-        match window.resolve(&version) {
-            WindowResolution::InWindow(block) => Ok((window, block)),
-            WindowResolution::BelowFloor => Err(StateServiceError::VersionTooOld),
-            WindowResolution::AboveTip => Err(RpcError::Storage(StorageError::NotFound(
-                "Block".to_string(),
-                format!("{version:?}"),
-            ))
-            .into()),
-        }
+        let block = match window.resolve(&version) {
+            WindowResolution::InWindow(block) => block,
+            WindowResolution::BelowFloor => return Err(StateServiceError::VersionTooOld),
+            WindowResolution::AboveTip => {
+                return Err(RpcError::Storage(StorageError::NotFound(
+                    "Block".to_string(),
+                    format!("{version:?}"),
+                ))
+                .into())
+            }
+        };
+        let value = read(&window, block.number).map_err(RpcError::from)?;
+        Ok((WriteTimestamp::from(&block), value))
     }
 }
 
