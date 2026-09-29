@@ -39,7 +39,7 @@
 //! [`DeltaWindow::fold_committed`], clears the window, and lets the replay refill it.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -427,19 +427,40 @@ impl DeltaWindow {
         accounts: &[Bytes],
         upto: Option<BlockNumberOrTimestamp>,
     ) -> Result<WindowPatch, StorageError> {
+        // The requested keys as sets. Each block is scanned by its own changed keys, which are
+        // usually far fewer than a full page of ids, and each key is checked against these sets.
+        let components: HashSet<&str> = components.iter().copied().collect();
+        let accounts: HashSet<&Bytes> = accounts.iter().collect();
+
         let mut patch = WindowPatch::default();
+        // Reused across blocks: the requested keys the current block touches. A key present in
+        // several of the block's maps is collected once, so the block yields one change per key.
+        let mut touched_components: HashSet<&str> = HashSet::new();
+        let mut touched_accounts: HashSet<&Bytes> = HashSet::new();
         for entry in self.blocks(None, upto)? {
             let at = WriteTimestamp::from(&entry.block);
-            for id in components {
-                let created = entry
-                    .new_protocol_components
-                    .contains_key(*id);
-                let delta = entry.state_deltas.get(*id).cloned();
-                let balances = entry
-                    .component_balances
-                    .get(*id)
-                    .cloned();
-                if created || delta.is_some() || balances.is_some() {
+
+            // Components: created, state changed or balance changed in this block.
+            if !components.is_empty() {
+                touched_components.clear();
+                touched_components.extend(
+                    entry
+                        .new_protocol_components
+                        .keys()
+                        .chain(entry.state_deltas.keys())
+                        .chain(entry.component_balances.keys())
+                        .map(String::as_str)
+                        .filter(|id| components.contains(id)),
+                );
+                for &id in &touched_components {
+                    let created = entry
+                        .new_protocol_components
+                        .contains_key(id);
+                    let delta = entry.state_deltas.get(id).cloned();
+                    let balances = entry
+                        .component_balances
+                        .get(id)
+                        .cloned();
                     patch
                         .components
                         .entry(id.to_string())
@@ -447,16 +468,26 @@ impl DeltaWindow {
                         .push(ComponentChange { at, created, delta, balances });
                 }
             }
-            for address in accounts {
-                let delta = entry
-                    .account_deltas
-                    .get(address)
-                    .cloned();
-                let balances = entry
-                    .account_balances
-                    .get(address)
-                    .cloned();
-                if delta.is_some() || balances.is_some() {
+
+            // Accounts: delta or token balances changed in this block.
+            if !accounts.is_empty() {
+                touched_accounts.clear();
+                touched_accounts.extend(
+                    entry
+                        .account_deltas
+                        .keys()
+                        .chain(entry.account_balances.keys())
+                        .filter(|address| accounts.contains(address)),
+                );
+                for &address in &touched_accounts {
+                    let delta = entry
+                        .account_deltas
+                        .get(address)
+                        .cloned();
+                    let balances = entry
+                        .account_balances
+                        .get(address)
+                        .cloned();
                     patch
                         .accounts
                         .entry(address.clone())
@@ -763,6 +794,36 @@ mod test {
                 balances: Some(HashMap::new())
             }]
         );
+    }
+
+    #[test]
+    fn capture_patch_yields_one_change_per_key_and_block() {
+        let address = Bytes::from_str("0x6F4Feb566b0f29e2edC231aDF88Fe7e1169D7c05").unwrap();
+        let mut m = with_account_balance(
+            with_account_delta(
+                testing::with_state_delta(with_component_balance(msg(1, 0, None), "c1"), "c1", 1),
+                &address,
+                1,
+            ),
+            &address,
+        );
+        m.new_protocol_components
+            .insert("c1".to_string(), Default::default());
+        let mut w = window(128, 1);
+        put(&mut w, m).unwrap();
+
+        let patch = w
+            .capture_patch(&["c1"], std::slice::from_ref(&address), None)
+            .unwrap();
+
+        let [component] = patch.components["c1"].as_slice() else {
+            panic!("expected one component change, got {:?}", patch.components["c1"]);
+        };
+        assert!(component.created && component.delta.is_some() && component.balances.is_some());
+        let [account] = patch.accounts[&address].as_slice() else {
+            panic!("expected one account change, got {:?}", patch.accounts[&address]);
+        };
+        assert!(account.delta.is_some() && account.balances.is_some());
     }
 
     #[test]
