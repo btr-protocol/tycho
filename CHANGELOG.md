@@ -1,3 +1,53 @@
+## [0.429.0](https://github.com/propeller-heads/tycho/compare/0.428.1...0.429.0) (2026-09-28)
+
+
+### Features
+
+* add Arc Uniswap V3 and V4 Substreams ([#1496](https://github.com/propeller-heads/tycho/issues/1496)) ([417ea58](https://github.com/propeller-heads/tycho/commit/417ea58a45d95d0037f7d3ab221b0641d2bb0018))
+* **common:** add snapshot chunk types and move WriteTimestamp ([be948cb](https://github.com/propeller-heads/tycho/commit/be948cb6927849e2f9fc0310cd7a482c2f9e98ce))
+* **indexer:** add the entity cache mode flag ([737db8e](https://github.com/propeller-heads/tycho/commit/737db8ea454eb3e7940497b42dcebb1dc36cc6a6))
+* **indexer:** build the EntityCache from a snapshot stream ([a84ff58](https://github.com/propeller-heads/tycho/commit/a84ff5876035ba1c2631ff53825f4d821c7a0367))
+* **indexer:** check snapshot totals and report the load ([0b0a044](https://github.com/propeller-heads/tycho/commit/0b0a04420e5d4eaa37196514b92a9eb4401af578))
+* **indexer:** fold windows into the EntityCache when one is set ([f03c8e9](https://github.com/propeller-heads/tycho/commit/f03c8e98f3a736255d347a297e08327f4d0d1af5))
+* **indexer:** load the entity cache before the server starts ([6b8fab5](https://github.com/propeller-heads/tycho/commit/6b8fab57aed5c87206dba8c04e01279e4bedfef9))
+* **storage:** read cursors and row totals for the snapshot ([e1e0a9b](https://github.com/propeller-heads/tycho/commit/e1e0a9bff3023cc6dced8ac7362db2621d30e8df))
+* **storage:** read live account snapshots in chunks ([fd3fb69](https://github.com/propeller-heads/tycho/commit/fd3fb69fdcfb8ba51b7ed479459bd4db43857cd1))
+* **storage:** read live component snapshots in chunks ([9b2f461](https://github.com/propeller-heads/tycho/commit/9b2f4619d449f2777a20178e841761582b111a19))
+* **storage:** stream the state snapshot from one transaction ([96ac3cf](https://github.com/propeller-heads/tycho/commit/96ac3cfc530e856863e7142c7f441539943ec8f5))
+* **substreams:** add Arc Uniswap V3 and V4 manifests ([d3e54bc](https://github.com/propeller-heads/tycho/commit/d3e54bc08caca3758cd4d46d747acb90ab16887c))
+
+
+### Bug Fixes
+
+* **ci:** restore trusted Substreams diff SHA ([0aee8ad](https://github.com/propeller-heads/tycho/commit/0aee8ad4ffad4c69e75d4e6734e919f4a75d7418))
+* **storage:** take the newest of two live code or balance rows in the snapshot ([e3213b5](https://github.com/propeller-heads/tycho/commit/e3213b597c8f4b0a618a3adc86bd360d9fd013be))
+* **storage:** treat rows reopened by a revert as live in the snapshot ([ca4dc5a](https://github.com/propeller-heads/tycho/commit/ca4dc5a3c625f44c68b24fef6e0027d36e44949d))
+* **testing:** exercise Arc V3 and V4 packages in CI ([6a92e2a](https://github.com/propeller-heads/tycho/commit/6a92e2aaa876034f1eec17fb1384df3e06a6c7b9))
+
+## [0.428.1](https://github.com/propeller-heads/tycho/compare/0.428.0...0.428.1) (2026-09-28)
+
+
+### Bug Fixes
+
+* **integration-test:** simulate swaps without a priority fee ([82dc357](https://github.com/propeller-heads/tycho/commit/82dc35743db011b2714dd03f733a1ae9702c6646))
+* **integration-test:** simulate swaps without a priority fee ([#1504](https://github.com/propeller-heads/tycho/issues/1504)) ([7407cd8](https://github.com/propeller-heads/tycho/commit/7407cd837af3b681312e74f079545f598ca83f8f))
+
+## [0.428.0](https://github.com/propeller-heads/tycho/compare/0.427.1...0.428.0) (2026-09-28)
+
+
+### Features
+
+* **simulation:** keep curve pools priced by trusted rate oracles ([609b899](https://github.com/propeller-heads/tycho/commit/609b8998fc52f6f8935a10915b9921e0cea81822))
+* **simulation:** keep curve pools priced by trusted rate oracles ([#1499](https://github.com/propeller-heads/tycho/issues/1499)) ([81dbd57](https://github.com/propeller-heads/tycho/commit/81dbd5792261993178b687527e1ac1348873aad5))
+
+## [0.427.1](https://github.com/propeller-heads/tycho/compare/0.427.0...0.427.1) (2026-09-28)
+
+
+### Bug Fixes
+
+* **metric:** treat unquoted book sides as having no liquidity ([be37ebb](https://github.com/propeller-heads/tycho/commit/be37ebb1667eec3bc94279068ff7c1d4a64ebcc0))
+* **metric:** treat unquoted book sides as having no liquidity ([#1505](https://github.com/propeller-heads/tycho/issues/1505)) ([802021a](https://github.com/propeller-heads/tycho/commit/802021a319f2ee4463f61c95fcb968725e7d1a15))
+
 ## [0.427.0](https://github.com/propeller-heads/tycho/compare/0.426.0...0.427.0) (2026-09-25)
 
 
