@@ -11,12 +11,15 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::evm::protocol::uniswap_v4::{
-    hooks::models::{
-        AfterSwapDelta, AfterSwapParameters, AmountRanges, BeforeSwapOutput, BeforeSwapParameters,
-        SwapParams, WithGasEstimate,
+use crate::evm::{
+    protocol::uniswap_v4::{
+        hooks::models::{
+            AfterSwapDelta, AfterSwapParameters, AmountRanges, BeforeSwapOutput,
+            BeforeSwapParameters, SwapParams, WithGasEstimate,
+        },
+        state::UniswapV4State,
     },
-    state::UniswapV4State,
+    simulation::PendingOverrides,
 };
 
 /// Trait for simulating the swap-related behavior of Uniswap V4 hooks.
@@ -26,20 +29,27 @@ use crate::evm::protocol::uniswap_v4::{
 /// including spot price adjustments, swap constraints, and state transitions.
 pub trait HookHandler: Debug + Send + Sync + 'static {
     fn address(&self) -> Address;
-    /// Simulates the beforeSwap Solidity behaviour
+    /// Simulates the beforeSwap Solidity behaviour.
+    ///
+    /// `pending` is the storage, native balances and block environment of a pending block.
+    /// `overwrites` take precedence over `pending` slot by slot. `None` runs against
+    /// confirmed state.
     fn before_swap(
         &self,
         params: BeforeSwapParameters,
         overwrites: Option<HashMap<Address, HashMap<U256, U256>>>,
         transient_storage: Option<HashMap<Address, HashMap<U256, U256>>>,
+        pending: Option<&PendingOverrides>,
     ) -> Result<WithGasEstimate<BeforeSwapOutput>, SimulationError>;
 
-    /// Simulates the afterSwap Solidity behaviour
+    /// Simulates the afterSwap Solidity behaviour, with `pending` as in
+    /// [`before_swap`](Self::before_swap).
     fn after_swap(
         &self,
         params: AfterSwapParameters,
         overwrites: Option<HashMap<Address, HashMap<U256, U256>>>,
         transient_storage_params: Option<HashMap<Address, HashMap<U256, U256>>>,
+        pending: Option<&PendingOverrides>,
     ) -> Result<WithGasEstimate<AfterSwapDelta>, SimulationError>;
 
     // Currently fee is not accessible on v4 pools, this is for future use

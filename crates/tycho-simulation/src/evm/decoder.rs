@@ -32,9 +32,11 @@ use crate::{
         engine_db::{update_engine, SHARED_TYCHO_DB},
         override_stream::{OverrideSnapshot, StateOverrideProvider},
         protocol::{
+            uniswap_v4::state::UniswapV4State,
             utils::bytes_to_address,
             vm::{constants::ERC20_PROXY_BYTECODE, erc20_token::IMPLEMENTATION_SLOT},
         },
+        simulation::{BlockEnvOverrides, PendingOverrides},
         tycho_models::{AccountUpdate, ResponseAccount},
     },
     protocol::{
@@ -1114,6 +1116,31 @@ where
                     warn!(pool = id, error = %e, "EphemeralDeltaTransitionError");
                 }
             }
+
+            // A hooked pool prices from its hook's storage, which only the pending block's
+            // account deltas carry. Every clone of this extractor gets the same overlay: an
+            // override for an account a hook never reads is inert.
+            if !deltas.account_deltas.is_empty() {
+                let block = current_block
+                    .as_ref()
+                    .map(|h| BlockEnvOverrides {
+                        number: Some(h.number),
+                        timestamp: Some(h.timestamp),
+                    });
+                let overrides =
+                    Arc::new(PendingOverrides::from_account_deltas(&deltas.account_deltas, block));
+                for id in deltas.state_deltas.keys() {
+                    if let Some(state) = updated_states
+                        .get_mut(id)
+                        .and_then(|s| {
+                            s.as_any_mut()
+                                .downcast_mut::<UniswapV4State>()
+                        })
+                    {
+                        state.set_pending_overrides(Arc::clone(&overrides));
+                    }
+                }
+            }
         }
 
         // `header` is the block being built, so it already *is* the execution block — unlike
@@ -1715,6 +1742,96 @@ mod tests {
             .expect("decode failure");
 
         // The mock framework will assert that `delta_transition` was called exactly once
+    }
+
+    /// The pending block's account deltas must reach the clone a pending quote runs on, and
+    /// never the stored confirmed state.
+    #[tokio::test]
+    async fn test_apply_deltas_ephemeral_sets_pending_overrides_on_the_clone_only() {
+        use tycho_common::models::{
+            blockchain::BlockAggregatedChanges, contract::AccountDelta,
+            protocol::ProtocolComponentStateDelta, ChangeType as ModelChangeType,
+        };
+
+        use crate::evm::protocol::uniswap_v4::state::UniswapV4Fees;
+
+        let decoder = TychoStreamDecoder::<BlockHeader>::new(Chain::Ethereum);
+        let pool_id = "0xhooked".to_string();
+        let pool = UniswapV4State::new(
+            1000,
+            U256::from(1u8) << 96,
+            UniswapV4Fees::new(0, 0, 3000),
+            0,
+            60,
+            vec![],
+        )
+        .unwrap();
+        decoder
+            .state
+            .write()
+            .await
+            .states
+            .insert(pool_id.clone(), Box::new(pool));
+
+        let hook = Bytes::from(vec![7u8; 20]);
+        let deltas = BlockAggregatedChanges {
+            extractor: "uniswap_v4_hooks".to_string(),
+            state_deltas: HashMap::from([(
+                pool_id.clone(),
+                ProtocolComponentStateDelta {
+                    component_id: pool_id.clone(),
+                    updated_attributes: HashMap::from([(
+                        "liquidity".to_string(),
+                        Bytes::from(2000_u64.to_be_bytes().to_vec()),
+                    )]),
+                    deleted_attributes: HashSet::new(),
+                    created_attributes: HashSet::new(),
+                },
+            )]),
+            account_deltas: HashMap::from([(
+                hook.clone(),
+                AccountDelta::new(
+                    Chain::Ethereum,
+                    hook.clone(),
+                    HashMap::from([(Bytes::from(vec![0u8]), Some(Bytes::from(vec![9u8])))]),
+                    None,
+                    None,
+                    ModelChangeType::Update,
+                ),
+            )]),
+            ..Default::default()
+        };
+        let header = BlockHeader { number: 10, timestamp: 20, ..Default::default() };
+
+        let update = decoder
+            .apply_deltas_ephemeral(
+                &HashMap::from([("uniswap_v4_hooks".to_string(), deltas)]),
+                header,
+            )
+            .await
+            .unwrap();
+
+        let clone = update.states[&pool_id]
+            .as_any()
+            .downcast_ref::<UniswapV4State>()
+            .unwrap();
+        let pending = clone
+            .pending_overrides()
+            .expect("the clone carries the pending block's overrides");
+        assert_eq!(
+            pending.block,
+            Some(BlockEnvOverrides { number: Some(10), timestamp: Some(20) })
+        );
+        assert_eq!(
+            pending.storage.as_ref().unwrap()[&Address::from_slice(&hook)][&U256::ZERO],
+            U256::from(9)
+        );
+        let stored = decoder.state.read().await;
+        let stored = stored.states[&pool_id]
+            .as_any()
+            .downcast_ref::<UniswapV4State>()
+            .unwrap();
+        assert!(stored.pending_overrides().is_none(), "confirmed state is never overlaid");
     }
 
     #[test]

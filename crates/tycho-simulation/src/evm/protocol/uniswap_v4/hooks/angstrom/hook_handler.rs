@@ -11,12 +11,15 @@ use tycho_common::{
     Bytes,
 };
 
-use crate::evm::protocol::uniswap_v4::hooks::{
-    hook_handler::HookHandler,
-    models::{
-        AfterSwapDelta, AfterSwapParameters, AmountRanges, BeforeSwapDelta, BeforeSwapOutput,
-        BeforeSwapParameters, SwapParams, WithGasEstimate,
+use crate::evm::{
+    protocol::uniswap_v4::hooks::{
+        hook_handler::HookHandler,
+        models::{
+            AfterSwapDelta, AfterSwapParameters, AmountRanges, BeforeSwapDelta, BeforeSwapOutput,
+            BeforeSwapParameters, SwapParams, WithGasEstimate,
+        },
     },
+    simulation::PendingOverrides,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
@@ -64,6 +67,7 @@ impl HookHandler for AngstromHookHandler {
         params: BeforeSwapParameters,
         _: Option<HashMap<Address, HashMap<U256, U256>>>,
         _: Option<HashMap<Address, HashMap<U256, U256>>>,
+        _: Option<&PendingOverrides>,
     ) -> Result<WithGasEstimate<BeforeSwapOutput>, SimulationError> {
         if self.pool_removed {
             return Err(SimulationError::FatalError(format!(
@@ -105,6 +109,7 @@ impl HookHandler for AngstromHookHandler {
         params: AfterSwapParameters,
         _: Option<HashMap<Address, HashMap<U256, U256>>>,
         _: Option<HashMap<Address, HashMap<U256, U256>>>,
+        _: Option<&PendingOverrides>,
     ) -> Result<WithGasEstimate<AfterSwapDelta>, SimulationError> {
         let fee_rate_e6 = I128::unchecked_from(self.fees.protocol_unlock.to::<u32>());
         let one_e6 = I128::unchecked_from(1_000_000);
@@ -255,7 +260,7 @@ mod tests {
         };
 
         let result = handler
-            .before_swap(params, None, None)
+            .before_swap(params, None, None, None)
             .unwrap();
 
         // Tenderly response:
@@ -317,7 +322,7 @@ mod tests {
         };
 
         let result = handler
-            .after_swap(params, None, None)
+            .after_swap(params, None, None, None)
             .unwrap();
 
         // Taken from tenderly simulation: output of innermost afterSwap call (directly to hook,

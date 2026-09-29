@@ -1,4 +1,4 @@
-use std::{any::Any, collections::HashMap, fmt};
+use std::{any::Any, collections::HashMap, fmt, sync::Arc};
 
 use alloy::primitives::{Address, Sign, I256, U256};
 use num_bigint::BigUint;
@@ -20,33 +20,38 @@ use tycho_common::{
 
 use super::hooks::utils::{has_permission, HookOptions};
 use crate::{
-    evm::protocol::{
-        clmm::clmm_swap_to_price,
-        safe_math::{safe_add_u256, safe_sub_u256},
-        u256_num::u256_to_biguint,
-        uniswap_v4::hooks::{
-            hook_handler::HookHandler,
-            models::{
-                AfterSwapParameters, BalanceDelta, BeforeSwapDelta, BeforeSwapParameters,
-                StateContext, SwapParams,
-            },
-        },
-        utils::{
-            add_fee_markup,
-            uniswap::{
-                i24_be_bytes_to_i32, liquidity_math,
-                lp_fee::{self, is_dynamic},
-                sqrt_price_math::{get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64},
-                swap_math,
-                tick_list::{TickInfo, TickList, TickListErrorKind},
-                tick_math::{
-                    get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
-                    MIN_SQRT_RATIO, MIN_TICK,
+    evm::{
+        protocol::{
+            clmm::clmm_swap_to_price,
+            safe_math::{safe_add_u256, safe_sub_u256},
+            u256_num::u256_to_biguint,
+            uniswap_v4::hooks::{
+                hook_handler::HookHandler,
+                models::{
+                    AfterSwapParameters, BalanceDelta, BeforeSwapDelta, BeforeSwapParameters,
+                    StateContext, SwapParams,
                 },
-                StepComputation, SwapResults, SwapState,
             },
+            utils::{
+                add_fee_markup,
+                uniswap::{
+                    i24_be_bytes_to_i32, liquidity_math,
+                    lp_fee::{self, is_dynamic},
+                    sqrt_price_math::{
+                        get_amount0_delta, get_amount1_delta, sqrt_price_q96_to_f64,
+                    },
+                    swap_math,
+                    tick_list::{TickInfo, TickList, TickListErrorKind},
+                    tick_math::{
+                        get_sqrt_ratio_at_tick, get_tick_at_sqrt_ratio, MAX_SQRT_RATIO, MAX_TICK,
+                        MIN_SQRT_RATIO, MIN_TICK,
+                    },
+                    StepComputation, SwapResults, SwapState,
+                },
+            },
+            vm::constants::EXTERNAL_ACCOUNT,
         },
-        vm::constants::EXTERNAL_ACCOUNT,
+        simulation::PendingOverrides,
     },
     impl_non_serializable_protocol,
 };
@@ -80,6 +85,9 @@ pub struct UniswapV4State {
     ticks: TickList,
     tick_spacing: i32,
     pub hook: Option<Box<dyn HookHandler>>,
+    /// Storage and block environment a pending quote runs the hook under. `None` on confirmed
+    /// state; set only on the clones `apply_deltas_ephemeral` hands out.
+    pending: Option<Arc<PendingOverrides>>,
 }
 
 impl_non_serializable_protocol!(UniswapV4State, "not supported due vm state deps");
@@ -92,6 +100,7 @@ impl fmt::Debug for UniswapV4State {
             .field("fees", &self.fees)
             .field("tick", &self.tick)
             .field("tick_spacing", &self.tick_spacing)
+            .field("pending", &self.pending.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -169,7 +178,17 @@ impl UniswapV4State {
             ticks: tick_list,
             tick_spacing,
             hook: None,
+            pending: None,
         })
+    }
+
+    /// Runs the hook of every quote from this state under `overrides`.
+    pub fn set_pending_overrides(&mut self, overrides: Arc<PendingOverrides>) {
+        self.pending = Some(overrides);
+    }
+
+    pub fn pending_overrides(&self) -> Option<&PendingOverrides> {
+        self.pending.as_deref()
     }
 
     fn swap(
@@ -559,7 +578,7 @@ impl ProtocolSim for UniswapV4State {
                 };
 
                 let before_swap_result = hook
-                    .before_swap(before_swap_params, None, None)
+                    .before_swap(before_swap_params, None, None, self.pending.as_deref())
                     .map_err(|e| {
                         SimulationError::FatalError(format!(
                             "BeforeSwap hook simulation failed: {e:?}"
@@ -629,7 +648,12 @@ impl ProtocolSim for UniswapV4State {
                 };
 
                 let after_swap_result = hook
-                    .after_swap(after_swap_params, storage_overwrites, None)
+                    .after_swap(
+                        after_swap_params,
+                        storage_overwrites,
+                        None,
+                        self.pending.as_deref(),
+                    )
                     .map_err(|e| {
                         SimulationError::FatalError(format!(
                             "AfterSwap hook simulation failed: {e:?}"
@@ -1013,6 +1037,7 @@ mod tests {
                 uniswap_v4::hooks::{
                     angstrom::hook_handler::{AngstromFees, AngstromHookHandler},
                     generic_vm_hook_handler::GenericVMHookHandler,
+                    models::{AfterSwapDelta, AmountRanges, BeforeSwapOutput, WithGasEstimate},
                 },
                 utils::uniswap::{lp_fee, sqrt_price_math::get_sqrt_price_q96},
             },
@@ -1272,6 +1297,213 @@ mod tests {
 
         assert_eq!(&res.1, &out.amount);
     }
+    /// The hook calls a quote made, each with the overrides it ran under.
+    type SeenCalls = Vec<(&'static str, Option<PendingOverrides>)>;
+
+    /// A hook whose beforeSwap fee is whatever the pending block wrote to its slot 0, and
+    /// which records the overrides each call ran under.
+    #[derive(Debug, Clone)]
+    struct SlotFeeHook {
+        address: Address,
+        seen: Arc<std::sync::Mutex<SeenCalls>>,
+    }
+
+    impl SlotFeeHook {
+        /// Low address bits are the permission flags: bit 7 beforeSwap, bit 6 afterSwap.
+        fn new() -> Self {
+            let mut address = [0u8; 20];
+            address[19] = 0xC0;
+            Self { address: Address::from_slice(&address), seen: Arc::default() }
+        }
+
+        fn pending_fee(&self, pending: Option<&PendingOverrides>) -> U256 {
+            pending
+                .and_then(|p| p.storage.as_ref())
+                .and_then(|storage| storage.get(&self.address))
+                .and_then(|slots| slots.get(&U256::ZERO))
+                .copied()
+                .unwrap_or(U256::ZERO)
+        }
+    }
+
+    impl HookHandler for SlotFeeHook {
+        fn address(&self) -> Address {
+            self.address
+        }
+
+        fn before_swap(
+            &self,
+            _: BeforeSwapParameters,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+            pending: Option<&PendingOverrides>,
+        ) -> Result<WithGasEstimate<BeforeSwapOutput>, SimulationError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(("before", pending.cloned()));
+            let fee = self.pending_fee(pending);
+            let fee = if fee.is_zero() { U24::ZERO } else { U24::from(fee) | U24::from(0x400000) };
+            Ok(WithGasEstimate {
+                gas_estimate: 0,
+                result: BeforeSwapOutput {
+                    amount_delta: BeforeSwapDelta(I256::ZERO),
+                    fee,
+                    overwrites: HashMap::new(),
+                    transient_storage: HashMap::new(),
+                },
+            })
+        }
+
+        fn after_swap(
+            &self,
+            _: AfterSwapParameters,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+            _: Option<HashMap<Address, HashMap<U256, U256>>>,
+            pending: Option<&PendingOverrides>,
+        ) -> Result<WithGasEstimate<AfterSwapDelta>, SimulationError> {
+            self.seen
+                .lock()
+                .unwrap()
+                .push(("after", pending.cloned()));
+            Ok(WithGasEstimate { gas_estimate: 0, result: I128::ZERO })
+        }
+
+        fn fee(&self, _: &UniswapV4State, _: SwapParams) -> Result<f64, SimulationError> {
+            Ok(0.0)
+        }
+
+        fn spot_price(&self, _: &Token, _: &Token) -> Result<f64, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn get_amount_ranges(&self, _: Bytes, _: Bytes) -> Result<AmountRanges, SimulationError> {
+            Err(SimulationError::RecoverableError("not implemented".into()))
+        }
+
+        fn delta_transition(
+            &mut self,
+            _: ProtocolStateDelta,
+            _: &HashMap<Bytes, Token>,
+            _: &Balances,
+        ) -> Result<(), TransitionError> {
+            Ok(())
+        }
+
+        fn clone_box(&self) -> Box<dyn HookHandler> {
+            Box::new(self.clone())
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn is_equal(&self, other: &dyn HookHandler) -> bool {
+            other
+                .as_any()
+                .downcast_ref::<Self>()
+                .is_some_and(|o| o.address == self.address)
+        }
+    }
+
+    /// A pool at price one with liquidity on both sides of the current tick.
+    fn hooked_pool(hook: &SlotFeeHook) -> UniswapV4State {
+        let liquidity = 1_000_000_000_000_000_000u128;
+        let mut pool = UniswapV4State::new(
+            liquidity,
+            U256::from(1u8) << 96,
+            UniswapV4Fees { zero_for_one: 0, one_for_zero: 0, lp_fee: lp_fee::DYNAMIC_FEE_FLAG },
+            0,
+            60,
+            vec![
+                TickInfo::new(-60, liquidity as i128).unwrap(),
+                TickInfo::new(60, -(liquidity as i128)).unwrap(),
+            ],
+        )
+        .unwrap();
+        pool.set_hook_handler(Box::new(hook.clone()));
+        pool
+    }
+
+    fn pending_with_hook_slot(hook: &SlotFeeHook, fee_pips: u64) -> PendingOverrides {
+        PendingOverrides {
+            storage: Some(HashMap::from([(
+                hook.address,
+                HashMap::from([(U256::ZERO, U256::from(fee_pips))]),
+            )])),
+            native_balances: None,
+            block: None,
+        }
+    }
+
+    #[test]
+    fn test_pending_overrides_reach_both_hook_calls_and_change_the_quote() {
+        let hook = SlotFeeHook::new();
+        let amount_in = BigUint::from(1_000_000u64);
+
+        let confirmed = hooked_pool(&hook)
+            .get_amount_out(amount_in.clone(), &token_x(), &token_y())
+            .unwrap();
+        let mut pool = hooked_pool(&hook);
+        pool.set_pending_overrides(Arc::new(pending_with_hook_slot(&hook, 100_000)));
+        let pending = pool
+            .get_amount_out(amount_in, &token_x(), &token_y())
+            .unwrap();
+
+        assert!(
+            pending.amount < confirmed.amount,
+            "a 10% fee the pending block wrote must cut the output: {} vs {}",
+            pending.amount,
+            confirmed.amount
+        );
+        let seen = hook.seen.lock().unwrap();
+        let calls: Vec<(&str, bool)> = seen
+            .iter()
+            .map(|(call, pending)| {
+                (
+                    *call,
+                    pending
+                        .as_ref()
+                        .is_some_and(|p| p.storage.is_some()),
+                )
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            vec![("before", false), ("after", false), ("before", true), ("after", true)],
+            "the confirmed quote runs both calls without overrides, the pending one with them"
+        );
+    }
+
+    #[test]
+    fn test_pending_overrides_survive_clone_box_and_stay_off_confirmed_state() {
+        let hook = SlotFeeHook::new();
+        let mut pool = hooked_pool(&hook);
+        pool.delta_transition(
+            ProtocolStateDelta {
+                component_id: "pool".into(),
+                updated_attributes: HashMap::from([(
+                    "liquidity".to_string(),
+                    Bytes::from(2_000_u64.to_be_bytes().to_vec()),
+                )]),
+                deleted_attributes: HashSet::new(),
+            },
+            &HashMap::new(),
+            &Balances::default(),
+        )
+        .unwrap();
+        assert!(pool.pending_overrides().is_none(), "a confirmed transition sets no overrides");
+
+        pool.set_pending_overrides(Arc::new(pending_with_hook_slot(&hook, 1)));
+        let cloned = pool.clone_box();
+        let cloned = cloned
+            .as_any()
+            .downcast_ref::<UniswapV4State>()
+            .unwrap();
+        assert!(cloned.pending_overrides().is_some(), "a clone quotes under the same overrides");
+        assert!(pool == *cloned, "overrides are not part of equality");
+    }
+
     #[test]
     fn test_get_amount_out_no_hook() {
         // Test using transaction 0x78ea4bbb7d4405000f33fdf6f3fa08b5e557d50e5e7f826a79766d50bd643b6f
