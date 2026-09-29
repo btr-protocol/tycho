@@ -159,6 +159,7 @@ fn test_parse_component_balance() {
         balance: msg_balance.to_vec(),
         token: msg_token,
         component_id: msg_component_id,
+        ..Default::default()
     };
     let from_message = ComponentBalance::try_from_message((msg, &tx)).unwrap();
 

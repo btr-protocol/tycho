@@ -147,6 +147,7 @@ pub fn aggregate_balances_changes(
                     token: hex::decode(token_id).expect("Token ID not valid hex"),
                     balance: big_endian_bytes_balance,
                     component_id: component_id.as_bytes().to_vec(),
+                    ..Default::default()
                 },
             )
         })
@@ -445,6 +446,7 @@ mod tests {
                                     .to_signed_bytes_be()
                                     .to_vec(),
                                 component_id: comp_id.clone(),
+                                ..Default::default()
                             },
                         ),
                         (
@@ -453,6 +455,7 @@ mod tests {
                                 token: token_1,
                                 balance: vec![150],
                                 component_id: comp_id.clone(),
+                                ..Default::default()
                             },
                         ),
                     ]
