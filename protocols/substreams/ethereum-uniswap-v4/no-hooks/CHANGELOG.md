@@ -3,6 +3,9 @@
 ## v0.4.3
 
 - Add the Monad Uniswap V4 no-hooks manifest (PoolManager `0x188d586ddcf52439676ca21a244753fa19f9ea8e`, first `Initialize` at block 30255261).
+- Index only pools with no hook and a static LP fee (all manifests bumped to v0.4.3). The filter used to admit any hook without
+  swap permission bits; such a hook can still call `updateDynamicLPFee` on a dynamic-fee pool and
+  change the fee between the indexed state and a swap.
 
 ## v0.4.2
 
