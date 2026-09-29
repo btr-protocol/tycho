@@ -1,8 +1,11 @@
 specVersion: v0.1.0
 package:
   name: "monad_pancakeswap_v3"
-  version: v0.1.4
+  version: v0.1.5
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-pancakeswap-v3"
+
+imports:
+  ethereum_common: https://spkg.io/streamingfast/ethereum-common-v0.3.3.spkg
 
 protobuf:
   files:
@@ -22,6 +25,10 @@ modules:
   - name: map_pools_created
     kind: map
     initialBlock: 25819360
+    blockFilter:
+      module: ethereum_common:index_events
+      query:
+        string: evt_sig:0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118 # PoolCreated
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -39,6 +46,22 @@ modules:
   - name: map_events
     kind: map
     initialBlock: 25819360
+    blockFilter:
+      module: ethereum_common:index_events
+      query:
+        # topic0 of every event the handlers decode. Pool addresses are dynamic, so
+        # match signatures; handlers still check factory and pool. Stores and maps
+        # fed only by filtered modules skip with them.
+        string: &v3_pool_events >-
+          evt_sig:0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118 ||
+          evt_sig:0x98636036cb66a9c19a37435efc1e90142190214e8abeb821bdba3f2990dd4c95 ||
+          evt_sig:0x7a53080ba414158be7ec69b987b5fb7d07dee101fe85488f0853ae16239d0bde ||
+          evt_sig:0x0c396cd989a39f4459b5fa1aed6a9a8dcdbc45908acfd67e028cd568da98982c ||
+          evt_sig:0x19b47279256b2a23a1665c810c8d55a1758940ee09377d4f8d26497a3577dc83 ||
+          evt_sig:0x70935338e69775456a85ddef226c395fb668b63fa0115f5f20610b388e6ca9c0 ||
+          evt_sig:0xbdbdb71d7860376ba52b25a5028beea23581364a40522f6bcfb86bb1f2dca633 ||
+          evt_sig:0xb3159fed3ddfba67bae294599eafe2d0ec98c08bb38e0e5fb87d33154b6e05aa ||
+          evt_sig:0x596b573906218d3411850b26a6b437d6c4522fdb43d2d2386263f86d50b8b151
     inputs:
       - source: sf.ethereum.type.v2.Block
       - store: store_pools
@@ -105,6 +128,10 @@ modules:
   - name: map_protocol_changes
     kind: map
     initialBlock: 25819360
+    blockFilter:
+      module: ethereum_common:index_events
+      query:
+        string: *v3_pool_events
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block

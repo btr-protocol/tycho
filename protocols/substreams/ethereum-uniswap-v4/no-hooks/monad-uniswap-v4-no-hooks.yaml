@@ -1,8 +1,11 @@
 specVersion: v0.1.0
 package:
   name: "monad_uniswap_v4_no_hooks"
-  version: v0.4.3
+  version: v0.4.4
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-uniswap-v4/no-hooks"
+
+imports:
+  ethereum_common: https://spkg.io/streamingfast/ethereum-common-v0.3.3.spkg
 
 protobuf:
   files:
@@ -26,6 +29,10 @@ modules:
   - name: map_pools_created
     kind: map
     initialBlock: 30255261
+    blockFilter:
+      module: ethereum_common:index_events
+      query:
+        string: evt_sig:0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438 # Initialize
     inputs:
       - params: string
       - source: sf.ethereum.type.v2.Block
@@ -43,6 +50,17 @@ modules:
   - name: map_events
     kind: map
     initialBlock: 30255261
+    blockFilter:
+      module: ethereum_common:index_events
+      query:
+        # topic0 of every event the handlers decode. Signatures, not the PoolManager
+        # address: map_events does not check the emitter. Stores and maps fed only
+        # by filtered modules skip with them.
+        string: &v4_pool_events >-
+          evt_sig:0xdd466e674ea557f56295e2d0218a125ea4b4f0f6f3307b95f85e6110838d6438 ||
+          evt_sig:0x40e9cecb9f5f1f1c5b9c97dec2917b7ee92e57ba5563708daca94dd84ad7112f ||
+          evt_sig:0xf208f4912782fd25c7f114ca3723a2d5dd6f3bcc3ac8db5af63baa85f711d5ec ||
+          evt_sig:0xe9c42593e71f84403b84352cd168d693e2c9fcd1fdbcc3feb21d92b43e6696f9
     inputs:
       - source: sf.ethereum.type.v2.Block
       - store: store_pools
@@ -118,6 +136,10 @@ modules:
   - name: map_protocol_changes
     kind: map
     initialBlock: 30255261
+    blockFilter:
+      module: ethereum_common:index_events
+      query:
+        string: *v4_pool_events
     inputs:
       - source: sf.ethereum.type.v2.Block
       - map: map_pools_created

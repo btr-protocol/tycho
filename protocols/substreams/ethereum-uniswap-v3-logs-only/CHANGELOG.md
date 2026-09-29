@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.6
+
+- Add a block filter to `monad-uniswap-v3.yaml`, using the `index_events` block index imported
+  from StreamingFast `ethereum-common` v0.3.3. `map_pools_created` runs only on blocks with a
+  `PoolCreated` log; `map_events` and `map_protocol_changes` only on blocks with a log whose
+  topic0 is `PoolCreated`, `Initialize`, `Mint`, `Burn`, `Swap`, `Collect`, `Flash`,
+  `SetFeeProtocol` or `CollectProtocol`. The modules fed only by these skip with them, so blocks
+  without a relevant log are neither processed nor billed. Output on matching blocks and the
+  module code are unchanged.
+
 ## v0.1.5
 
 - Add the Monad Uniswap V3 manifest (factory `0x204FAca1764B154221e35c0d20aBb3c525710498`, first `PoolCreated` at block 32036467).
