@@ -19,6 +19,7 @@ use super::{
     map_balance_changes::event_to_balance_deltas,
     map_events::log_to_event,
     map_protocol_changes::transaction_changes,
+    map_snapshot::snapshot_pools,
     map_store_liquidity::{event_to_current_tick, liquidity_changes},
     map_ticks::event_to_ticks_deltas,
 };
@@ -32,6 +33,10 @@ struct Fixture {
 #[derive(Deserialize)]
 struct Case {
     name: String,
+    /// The snapshot block. The stream starts at the next block.
+    start_block: u64,
+    /// The `map_snapshot` parameters the indexer passes, empty for a replay from deployment.
+    snapshot_params: String,
     pools: Vec<FixturePool>,
     start: HashMap<String, State>,
     logs: Vec<FixtureLog>,
@@ -123,28 +128,34 @@ impl Values {
 }
 
 fn run_case(case: &Case) {
-    let pools: HashMap<Vec<u8>, Pool> = case
-        .pools
-        .iter()
-        .map(|p| {
+    // The stores start from the snapshot the indexer passes; pools created in the stream would
+    // come from `map_pools_created`, which a replay from deployment emulates with the fixture list.
+    let snapshot = snapshot_pools(&case.snapshot_params, case.start_block + 1).unwrap();
+    let mut pools: HashMap<Vec<u8>, Pool> = HashMap::new();
+    let mut current_ticks: HashMap<String, i64> = HashMap::new();
+    for seeded in snapshot.pools {
+        let pool = seeded.pool.unwrap();
+        current_ticks.insert(hex::encode(&pool.address), seeded.tick.into());
+        pools.insert(pool.address.clone(), pool);
+    }
+    if case.snapshot_params.is_empty() {
+        for p in &case.pools {
             let address = unhex(&p.address);
-            (
-                address.clone(),
-                Pool {
-                    address,
-                    token0: unhex(&p.token0),
-                    token1: unhex(&p.token1),
-                    created_tx_hash: vec![],
-                },
-            )
-        })
-        .collect();
+            let pool = Pool {
+                address: address.clone(),
+                token0: unhex(&p.token0),
+                token1: unhex(&p.token1),
+                created_tx_hash: vec![],
+            };
+            pools.insert(address, pool);
+        }
+    }
+    assert_eq!(pools.len(), case.pools.len(), "case {}: snapshot pools", case.name);
     let mut state: HashMap<String, Values> = case
         .start
         .iter()
         .map(|(pool, state)| (pool.clone(), Values::from_state(state)))
         .collect();
-    let mut current_ticks: HashMap<String, i64> = HashMap::new();
 
     let mut blocks: BTreeMap<u64, Vec<&FixtureLog>> = BTreeMap::new();
     for log in &case.logs {
@@ -194,7 +205,8 @@ fn run_case(case: &Case) {
             }
         }
         let events = Events { pool_events };
-        let liquidity = liquidity_changes(events.clone(), |event| tick_before[&event.log_ordinal]);
+        let liquidity =
+            liquidity_changes(events.clone(), |event| tick_before[&event.log_ordinal]).unwrap();
         let changes = transaction_changes(
             BlockEntityChanges::default(),
             events.clone(),

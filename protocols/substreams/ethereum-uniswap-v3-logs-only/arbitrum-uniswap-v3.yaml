@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "arbitrum_uniswap_v3_logs_only"
-  version: v0.2.0
+  version: v0.3.0
   url: "https://github.com/propeller-heads/tycho-protocol-sdk/tree/main/substreams/ethereum-uniswap-v3-logs-only"
 
 protobuf:
@@ -23,6 +23,15 @@ binaries:
     file: ../target/wasm32-unknown-unknown/release/ethereum_uniswap_v3_logs_only.wasm
 
 modules:
+  - name: map_snapshot
+    kind: map
+    initialBlock: 165
+    inputs:
+      - params: string
+      - source: sf.substreams.v1.Clock
+    output:
+      type: proto:uniswap.v3.SnapshotPools
+
   - name: map_pools_created
     kind: map
     initialBlock: 165
@@ -38,6 +47,7 @@ modules:
     updatePolicy: set_if_not_exists
     valueType: proto:uniswap.v3.Pool
     inputs:
+      - map: map_snapshot
       - map: map_pools_created
 
   - name: map_events
@@ -71,6 +81,7 @@ modules:
     updatePolicy: set
     valueType: int64
     inputs:
+      - map: map_snapshot
       - map: map_events
 
   - name: map_liquidity_changes
@@ -96,4 +107,5 @@ modules:
       type: proto:tycho.evm.v1.BlockChanges
 
 params:
+  map_snapshot: ""
   map_pools_created: "factory_address=1F98431c8aD98523631AE4a59f267346ea31F984&protocol_type_name=uniswap_v3_pool"

@@ -1,5 +1,14 @@
 # Changelog
 
+## v0.3.0
+
+- Add `map_snapshot`. With empty parameters, the default, it emits nothing and the output is
+  unchanged. An indexer bootstrapped from a state snapshot at block N passes the snapshot's pools
+  and ticks, sets every module's `initialBlock` to N+1, and `store_pools` and
+  `store_pool_current_tick` start from them. The stream then processes no block before N+1.
+- A mint or burn is in range only when the pool's current tick says so. The v0.2.0 fallback that
+  guessed from the token amounts is removed, because the snapshot always provides the tick.
+
 ## v0.2.0
 
 - Emit tick net liquidity, pool balances, and the liquidity changes of mints and burns as
