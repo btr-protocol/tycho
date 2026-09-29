@@ -753,14 +753,14 @@ impl EthereumRpcClient {
     /// Injects arbitrary bytecode or storage at specified addresses before the call executes.
     /// Returns the raw ABI-encoded return data.
     #[instrument(level = "debug", skip(self, tx, overrides))]
-    pub(crate) async fn eth_call_with_state_overrides(
+    pub async fn eth_call_with_state_overrides(
         &self,
         tx: TransactionRequest,
-        block: BlockNumberOrTag,
+        block: BlockId,
         overrides: StateOverride,
     ) -> Result<AlloyBytes, RPCError> {
         let provider = ProviderBuilder::new().connect_client(self.inner.clone());
-        let block_id: BlockId = block.into();
+        let block_id = block;
         self.retry_policy
             .call_with_retry(|| {
                 let tx = tx.clone();
