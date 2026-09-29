@@ -1,0 +1,121 @@
+specVersion: v0.1.0
+package:
+  name: "monad_kuru"
+  version: v0.1.0
+
+protobuf:
+  files:
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+    - kuru.proto
+  importPaths:
+    - ./proto
+    - ../../../proto/
+  excludePaths:
+    - sf/ethereum
+    - google
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/monad_kuru.wasm
+
+# 33615323: first Kuru Router MarketRegistered on Monad.
+modules:
+  - name: map_markets
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+    output:
+      type: proto:tycho.evm.v1.BlockTransactionProtocolComponents
+
+  - name: store_markets
+    kind: store
+    initialBlock: 33615323
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - map: map_markets
+
+  - name: map_events
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - store: store_markets
+    output:
+      type: proto:kuru.v1.Events
+
+  - name: store_order_sizes
+    kind: store
+    initialBlock: 33615323
+    updatePolicy: set
+    valueType: bigint
+    inputs:
+      - map: map_events
+
+  - name: store_order_meta
+    kind: store
+    initialBlock: 33615323
+    updatePolicy: set_if_not_exists
+    valueType: string
+    inputs:
+      - map: map_events
+
+  - name: map_level_deltas
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - map: map_events
+      - store: store_order_sizes
+        mode: deltas
+      - store: store_order_meta
+      - store: store_markets
+    output:
+      type: proto:kuru.v1.LevelDeltas
+
+  - name: store_levels
+    kind: store
+    initialBlock: 33615323
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_level_deltas
+
+  - name: map_balance_deltas
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - map: map_level_deltas
+      - store: store_markets
+    output:
+      type: proto:tycho.evm.v1.BlockBalanceDeltas
+
+  - name: store_balances
+    kind: store
+    initialBlock: 33615323
+    updatePolicy: add
+    valueType: bigint
+    inputs:
+      - map: map_balance_deltas
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - source: sf.ethereum.type.v2.Block
+      - map: map_markets
+      - store: store_markets
+      - map: map_level_deltas
+      - store: store_levels
+        mode: deltas
+      - map: map_balance_deltas
+      - store: store_balances
+        mode: deltas
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
+
+params:
+  map_markets: "d651346d7c789536ebf06dc72aE3C8502cd695CC"
