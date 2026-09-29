@@ -85,6 +85,8 @@ static CLONE_TO_BASE_PROTOCOL: LazyLock<HashMap<&str, &str>> = LazyLock::new(|| 
         ("monad-uniswap-v3", "ethereum-uniswap-v3-logs-only"),
         ("monad-pancakeswap-v3", "ethereum-pancakeswap-v3"),
         ("monad-uniswap-v4-no-hooks", "ethereum-uniswap-v4/no-hooks"),
+        ("monad-balancer-v3", "ethereum-balancer-v3"),
+        ("monad-curve", "ethereum-curve"),
     ])
 });
 
@@ -1762,6 +1764,18 @@ mod tests {
                     "ethereum-uniswap-v4/no-hooks",
                     "integration_test_monad_uniswap_v4_no_hooks.tycho.yaml",
                     "./monad-uniswap-v4-no-hooks.yaml",
+                ),
+                (
+                    "monad-balancer-v3",
+                    "ethereum-balancer-v3",
+                    "integration_test_monad_balancer_v3.tycho.yaml",
+                    "./monad-balancer-v3.yaml",
+                ),
+                (
+                    "monad-curve",
+                    "ethereum-curve",
+                    "integration_test_monad_curve.tycho.yaml",
+                    "./monad-curve.yaml",
                 ),
             ],
         );
