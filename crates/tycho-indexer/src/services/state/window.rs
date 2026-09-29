@@ -131,8 +131,6 @@ pub(crate) enum WindowResolution {
 pub(crate) struct ComponentChange {
     /// The block the change belongs to.
     pub at: WriteTimestamp,
-    /// Whether the block created the component.
-    pub created: bool,
     /// State delta of the block, if the block changed the component's state.
     pub delta: Option<ProtocolComponentStateDelta>,
     /// Token balances of the block, if the block changed the component's balances.
@@ -430,14 +428,12 @@ impl DeltaWindow {
         // several of the block's maps is collected once, so the block yields one change per id.
         let mut touched: HashSet<&str> = HashSet::new();
         for entry in self.blocks(None, Some(BlockNumberOrTimestamp::Number(upto)))? {
-            // Collect the requested ids this block created, changed the state of, or changed
-            // the balances of.
+            // Collect the requested ids this block changed the state or balances of.
             touched.clear();
             touched.extend(
                 entry
-                    .new_protocol_components
+                    .state_deltas
                     .keys()
-                    .chain(entry.state_deltas.keys())
                     .chain(entry.component_balances.keys())
                     .map(String::as_str)
                     .filter(|id| requested.contains(id)),
@@ -446,9 +442,6 @@ impl DeltaWindow {
             // Record one change per touched id, stamped with the block.
             let at = WriteTimestamp::from(&entry.block);
             for &id in &touched {
-                let created = entry
-                    .new_protocol_components
-                    .contains_key(id);
                 let delta = entry.state_deltas.get(id).cloned();
                 let balances = entry
                     .component_balances
@@ -457,7 +450,7 @@ impl DeltaWindow {
                 changes
                     .entry(id.to_string())
                     .or_default()
-                    .push(ComponentChange { at, created, delta, balances });
+                    .push(ComponentChange { at, delta, balances });
             }
         }
         Ok(changes)
@@ -798,7 +791,6 @@ mod test {
             components["c1"],
             vec![ComponentChange {
                 at: WriteTimestamp::from(&testing::block(1)),
-                created: false,
                 delta: None,
                 balances: Some(HashMap::new())
             }]
@@ -816,7 +808,7 @@ mod test {
     #[test]
     fn changes_hold_one_change_per_key_and_block() {
         let address = Bytes::from_str("0x6F4Feb566b0f29e2edC231aDF88Fe7e1169D7c05").unwrap();
-        let mut m = with_account_balance(
+        let m = with_account_balance(
             with_account_delta(
                 testing::with_state_delta(with_component_balance(msg(1, 0, None), "c1"), "c1", 1),
                 &address,
@@ -824,8 +816,6 @@ mod test {
             ),
             &address,
         );
-        m.new_protocol_components
-            .insert("c1".to_string(), Default::default());
         let mut w = window(128, 1);
         put(&mut w, m).unwrap();
 
@@ -837,30 +827,11 @@ mod test {
         let [component] = components["c1"].as_slice() else {
             panic!("expected one component change, got {:?}", components["c1"]);
         };
-        assert!(component.created && component.delta.is_some() && component.balances.is_some());
+        assert!(component.delta.is_some() && component.balances.is_some());
         let [account] = accounts[&address].as_slice() else {
             panic!("expected one account change, got {:?}", accounts[&address]);
         };
         assert!(account.delta.is_some() && account.balances.is_some());
-    }
-
-    #[test]
-    fn component_changes_mark_the_block_that_created_the_component() {
-        let mut created = msg(1, 0, None);
-        created
-            .new_protocol_components
-            .insert("c1".to_string(), Default::default());
-        let mut w = window(128, 1);
-        put(&mut w, created).unwrap();
-        put(&mut w, testing::with_state_delta(msg(2, 0, None), "c1", 2)).unwrap();
-
-        let changes = w.component_changes(&["c1"], 2).unwrap();
-
-        let created: Vec<bool> = changes["c1"]
-            .iter()
-            .map(|c| c.created)
-            .collect();
-        assert_eq!(created, vec![true, false]);
     }
 
     #[test]

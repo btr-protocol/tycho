@@ -34,7 +34,7 @@ use thiserror::Error;
 use tracing::error;
 use tycho_common::{
     dto::{self, PaginationResponse},
-    models::{contract::Account, protocol::ProtocolComponentState, ChangeType, PaginationParams},
+    models::{contract::Account, protocol::ProtocolComponentState, PaginationParams},
     storage::{BlockOrTimestamp, StorageError, WriteTimestamp},
     Bytes,
 };
@@ -43,7 +43,7 @@ use super::{
     cache::{CachedAccount, CachedComponentState, EntityCache},
     window::{DeltaWindow, WindowResolution},
 };
-use crate::services::rpc::RpcError;
+use crate::services::{deltas_buffer::PendingDeltasError, rpc::RpcError};
 
 /// Which path answers state requests, holding what the cache modes need: the loaded
 /// [`EntityCache`] when building the services, the [`StateService`] once built.
@@ -108,7 +108,8 @@ impl StateService {
     /// Serves `/contract_state` from the cache.
     ///
     /// Paginates `contract_ids` the way the database path does (slice, then page) and reports
-    /// `total` as the number of requested ids. Addresses that exist nowhere are omitted.
+    /// `total` as the number of requested ids. An address the cache does not hold is built from its
+    /// window deltas, like the database path does.
     ///
     /// # Errors
     ///
@@ -116,6 +117,8 @@ impl StateService {
     /// [`StateServiceError::Rpc`] with:
     ///
     /// - `RpcError::Parse` (400) when `contract_ids` is `None`: the cache serves explicit ids only.
+    /// - `RpcError::DeltasError` (500), the database path's error, when an address is neither
+    ///   cached nor changed by a delta in the window.
     /// - `RpcError::Parse` (400) when the version is malformed, or `protocol_system` is empty or
     ///   has no window. Today this silently reads the database.
     /// - `RpcError::Storage(StorageError::NotFound("Block", ..))` when the version is a block
@@ -169,11 +172,9 @@ impl StateService {
                 .map_or(&[][..], Vec::as_slice);
             let (mut entry, changes) = match entry {
                 Some(entry) => (entry, changes),
-                // Not cached: the contract exists only if the window holds its creation. Anything
-                // else is omitted: changes to an account never created are not a complete account,
-                // and folds drop them the same way, so serving them would disagree with the cache
-                // once the block folds. The database path differs here: it builds an account from
-                // any first delta, and fails the whole request for an address it cannot find.
+                // Not cached: build the account from its first delta in the window and apply the
+                // rest, as the database path does for an address it does not hold. An address with
+                // no delta fails the whole request with the database path's error.
                 None => {
                     let Some((start, delta)) =
                         changes
@@ -183,19 +184,17 @@ impl StateService {
                                 change
                                     .delta
                                     .as_ref()
-                                    .filter(|delta| delta.change_type() == ChangeType::Creation)
                                     .map(|delta| (i, delta))
                             })
                     else {
-                        continue;
+                        return Err(RpcError::DeltasError(PendingDeltasError::ReorgBufferError(
+                            StorageError::NotFound("Contract".to_string(), address.to_string()),
+                        ))
+                        .into());
                     };
-                    let creation = &changes[start];
+                    let first = &changes[start];
                     (
-                        CachedAccount::from_creation(
-                            delta,
-                            creation.balances.as_ref(),
-                            creation.at,
-                        ),
+                        CachedAccount::from_creation(delta, first.balances.as_ref(), first.at),
                         &changes[start + 1..],
                     )
                 }
@@ -215,13 +214,16 @@ impl StateService {
     /// Serves `/protocol_state` from the cache.
     ///
     /// Same shape as [`Self::contract_state`]. Components are looked up under
-    /// `request.protocol_system`, the key folds use. Deleted attributes stay deleted. With
+    /// `request.protocol_system`, the key folds use. An id the cache does not hold is served as an
+    /// empty state with its window changes applied, like the database path does, so no id fails
+    /// the request. Deleted attributes stay deleted. With
     /// `include_balances == false` the balances are removed from the response, like the
     /// database path.
     ///
     /// # Errors
     ///
-    /// Same as [`Self::contract_state`], with `protocol_ids` in place of `contract_ids`.
+    /// Same as [`Self::contract_state`], with `protocol_ids` in place of `contract_ids`, except
+    /// that an unknown id is never an error.
     pub(crate) fn protocol_state(
         &self,
         request: &dto::ProtocolStateRequestBody,
@@ -280,27 +282,21 @@ impl StateService {
                     let newer = changes.partition_point(|change| change.at <= entry.updated_at());
                     (entry, &changes[newer..])
                 }
-                // Not cached: the component exists only if the window holds its creation. Anything
-                // else is omitted, as folds drop it. The database path differs here: it serves an
-                // unknown id as an empty state.
-                None => {
-                    let Some(start) = changes
-                        .iter()
-                        .position(|change| change.created)
-                    else {
-                        continue;
-                    };
-                    let creation = &changes[start];
-                    (
+                // Not cached: start from an empty state and apply every window change, as the
+                // database path does for an id it does not hold. An id the window never changed is
+                // served as that empty state.
+                None => match changes.split_first() {
+                    Some((first, rest)) => (
                         CachedComponentState::from_creation(
                             id,
-                            creation.delta.as_ref(),
-                            creation.balances.as_ref(),
-                            creation.at,
+                            first.delta.as_ref(),
+                            first.balances.as_ref(),
+                            first.at,
                         ),
-                        &changes[start + 1..],
-                    )
-                }
+                        rest,
+                    ),
+                    None => (CachedComponentState::from_creation(id, None, None, version), changes),
+                },
             };
             for change in changes {
                 entry.apply_block(change.delta.as_ref(), change.balances.as_ref(), change.at);
@@ -363,7 +359,7 @@ mod test {
         blockchain::BlockAggregatedChanges,
         contract::AccountDelta,
         protocol::{ComponentBalance, ProtocolComponent, ProtocolComponentStateDelta},
-        Chain,
+        Chain, ChangeType,
     };
 
     use super::*;
@@ -613,7 +609,7 @@ mod test {
     }
 
     #[test]
-    fn contract_state_serves_contracts_created_in_the_window_and_omits_unknown_ones() {
+    fn contract_state_builds_uncached_accounts_from_their_window_deltas() {
         let harness = accounts();
         harness.push(with_account(
             with_account(msg(6), account_delta(&addr(2), 6, ChangeType::Creation)),
@@ -623,14 +619,38 @@ mod test {
         let response = harness
             .service
             .contract_state(&contract_request(
-                vec![addr(1), addr(2), addr(3), addr(4)],
+                vec![addr(1), addr(2), addr(3)],
                 dto::VersionParam::default(),
             ))
             .unwrap();
 
-        assert_eq!(served_addresses(&response), vec![addr(1), addr(2)]);
+        assert_eq!(served_addresses(&response), vec![addr(1), addr(2), addr(3)]);
         assert_eq!(response.accounts[1].slots[&word(1)], word(6));
-        assert_eq!(response.pagination.total, 4);
+        assert_eq!(response.accounts[2].slots[&word(1)], word(6));
+    }
+
+    #[test]
+    fn contract_state_fails_like_the_database_path_for_an_unknown_address() {
+        let harness = accounts();
+
+        let result = harness
+            .service
+            .contract_state(&contract_request(
+                vec![addr(1), addr(4)],
+                dto::VersionParam::default(),
+            ));
+
+        let Err(StateServiceError::Rpc(err)) = result else {
+            panic!("expected the database path's error, got {result:?}");
+        };
+        assert_eq!(
+            err.to_string(),
+            RpcError::DeltasError(PendingDeltasError::ReorgBufferError(StorageError::NotFound(
+                "Contract".to_string(),
+                addr(4).to_string()
+            )))
+            .to_string()
+        );
     }
 
     #[test]
@@ -723,7 +743,7 @@ mod test {
     }
 
     #[test]
-    fn protocol_state_serves_components_created_in_the_window_and_omits_unknown_ones() {
+    fn protocol_state_serves_uncached_ids_like_the_database_path() {
         let harness = components();
         harness.push(testing::with_state_delta(
             testing::with_state_delta(with_component(msg(6), "c2"), "c2", 6),
@@ -744,9 +764,10 @@ mod test {
             .iter()
             .map(|state| state.component_id.as_str())
             .collect();
-        assert_eq!(ids, vec!["c1", "c2"]);
+        assert_eq!(ids, vec!["c1", "c2", "c3", "c4"]);
         assert_eq!(response.states[1].attributes["x"], Bytes::from(6u64));
-        assert_eq!(response.pagination.total, 4);
+        assert_eq!(response.states[2].attributes["x"], Bytes::from(6u64));
+        assert!(response.states[3].attributes.is_empty() && response.states[3].balances.is_empty());
     }
 
     #[test]
