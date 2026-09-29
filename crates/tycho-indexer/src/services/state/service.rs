@@ -31,6 +31,7 @@ use std::{
 };
 
 use thiserror::Error;
+use tracing::error;
 use tycho_common::{
     dto::{self, PaginationResponse},
     models::{contract::Account, protocol::ProtocolComponentState, ChangeType, PaginationParams},
@@ -251,9 +252,16 @@ impl StateService {
             let cache = self.cache.read();
             for id in &page {
                 let entry = cache.component(system, id);
-                // As for accounts: a fold can land between the capture and this read and move the
-                // entry past `version`, which the cache cannot roll back.
-                if entry.is_some_and(|entry| entry.updated_at() > version) {
+                // One extractor owns each component, so the entry can pass `version` only if this
+                // window's own fold lands between the capture and this read with `version` at the
+                // window floor. Not expected: log it and let the database path answer.
+                if let Some(entry) = entry.filter(|entry| entry.updated_at() > version) {
+                    error!(
+                        component = %id,
+                        entry = entry.updated_at().block_number(),
+                        version = version.block_number(),
+                        "Cached component is newer than the requested version"
+                    );
                     return Err(StateServiceError::VersionTooOld);
                 }
                 entries.push(entry.cloned());
