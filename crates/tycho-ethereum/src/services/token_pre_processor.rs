@@ -38,7 +38,7 @@ impl EthereumTokenPreProcessor {
 
         let result = match self
             .rpc
-            .eth_call(call_request(None, token, calldata), BlockNumberOrTag::Latest)
+            .eth_call(call_request(None, token, calldata), BlockNumberOrTag::Latest.into())
             .await
         {
             Ok(result) => result,
@@ -66,7 +66,7 @@ impl EthereumTokenPreProcessor {
 
         let result = match self
             .rpc
-            .eth_call(call_request(None, token, calldata), BlockNumberOrTag::Latest)
+            .eth_call(call_request(None, token, calldata), BlockNumberOrTag::Latest.into())
             .await
         {
             Ok(result) => result,

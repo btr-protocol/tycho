@@ -20,14 +20,17 @@ use alloy::{
                 },
                 parity::{TraceResults, TraceType},
             },
-            AccessListResult, Block, BlockId, BlockNumberOrTag, TransactionRequest,
+            AccessListResult, Block, BlockId, BlockNumberOrTag, Filter, Log, TransactionInput,
+            TransactionRequest,
         },
     },
+    sol,
+    sol_types::SolCall,
     transports::{http::reqwest, RpcError, TransportErrorKind, TransportResult},
 };
 use async_trait::async_trait;
 use backoff::backoff::Backoff;
-use futures::future::join_all;
+use futures::{future::join_all, stream, StreamExt, TryStreamExt};
 use num_bigint::BigUint;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -49,6 +52,25 @@ use crate::{
         SlotDetectorSlotTestRequest, SlotDetectorValueRequest,
     },
 };
+
+/// Multicall3, deployed at the same address on most EVM chains.
+pub const MULTICALL3_ADDRESS: Address =
+    alloy::primitives::address!("cA11bde05977b3631167028862bE2a173976CA11");
+
+sol! {
+    struct Call3 {
+        address target;
+        bool allowFailure;
+        bytes callData;
+    }
+
+    struct Result3 {
+        bool success;
+        bytes returnData;
+    }
+
+    function aggregate3(Call3[] calldata calls) external payable returns (Result3[] memory returnData);
+}
 
 /// This struct wraps the ReqwestClient and provides Ethereum-specific RPC methods
 /// with default batching support and retry logic.
@@ -214,10 +236,7 @@ impl EthereumRpcClient {
     }
 
     #[instrument(level = "debug", skip(self))]
-    pub(crate) async fn eth_get_block_by_number(
-        &self,
-        block_id: BlockId,
-    ) -> Result<Block, RPCError> {
+    pub async fn eth_get_block_by_number(&self, block_id: BlockId) -> Result<Block, RPCError> {
         let full_tx_objects = false;
 
         let result: Option<Block> = self
@@ -643,7 +662,7 @@ impl EthereumRpcClient {
     pub(crate) async fn eth_call(
         &self,
         request: TransactionRequest,
-        block: BlockNumberOrTag,
+        block: BlockId,
     ) -> Result<Bytes, RPCError> {
         self.retry_policy
             .call_with_retry(|| async {
@@ -658,6 +677,75 @@ impl EthereumRpcClient {
                     e,
                 )
             })
+    }
+
+    /// Returns the logs matching `filter`. The caller keeps the filter's block range within the
+    /// provider's `eth_getLogs` limit.
+    #[instrument(level = "debug", skip(self))]
+    pub async fn get_logs(&self, filter: &Filter) -> Result<Vec<Log>, RPCError> {
+        self.retry_policy
+            .call_with_retry(|| async {
+                self.inner
+                    .request("eth_getLogs", (filter,))
+                    .await
+            })
+            .await
+            .map_err(|e| RPCError::from_alloy(format!("Failed to get logs for {filter:?}"), e))
+    }
+
+    /// Executes `calls` at `block` through Multicall3's `aggregate3` and returns each call's
+    /// return data, in order.
+    ///
+    /// Sends `calls_per_request` calls per `eth_call` and keeps up to `concurrency` requests in
+    /// flight. Errors if any call reverts.
+    #[instrument(level = "debug", skip(self, calls), fields(calls = calls.len()))]
+    pub async fn multicall(
+        &self,
+        calls: &[(Address, AlloyBytes)],
+        block: BlockId,
+        calls_per_request: usize,
+        concurrency: usize,
+    ) -> Result<Vec<AlloyBytes>, RPCError> {
+        if calls_per_request == 0 || concurrency == 0 {
+            return Err(RPCError::SetupError(
+                "multicall needs calls_per_request and concurrency of at least 1".to_string(),
+            ));
+        }
+        let chunks: Vec<Vec<(Address, AlloyBytes)>> = calls
+            .chunks(calls_per_request)
+            .map(<[_]>::to_vec)
+            .collect();
+        let results: Vec<Vec<AlloyBytes>> = stream::iter(chunks)
+            .map(|chunk| async move {
+                let data = aggregate3Call {
+                    calls: chunk
+                        .iter()
+                        .map(|(target, call_data)| Call3 {
+                            target: *target,
+                            allowFailure: false,
+                            callData: call_data.clone(),
+                        })
+                        .collect(),
+                }
+                .abi_encode();
+                let request = TransactionRequest::default()
+                    .to(MULTICALL3_ADDRESS)
+                    .input(TransactionInput::both(data.into()));
+                let output = self.eth_call(request, block).await?;
+                let results = aggregate3Call::abi_decode_returns(output.as_ref()).map_err(|e| {
+                    RPCError::UnknownError(format!("Failed to decode aggregate3 output: {e}"))
+                })?;
+                Ok::<_, RPCError>(
+                    results
+                        .into_iter()
+                        .map(|result| result.returnData)
+                        .collect(),
+                )
+            })
+            .buffered(concurrency)
+            .try_collect()
+            .await?;
+        Ok(results.into_iter().flatten().collect())
     }
 
     /// Executes `eth_call` with EVM state overrides.
@@ -1524,7 +1612,7 @@ mod tests {
             .input(TransactionInput::both(calldata.into()));
 
         let result = client
-            .eth_call(request, BlockNumberOrTag::Number(TEST_BLOCK_NUMBER))
+            .eth_call(request, BlockNumberOrTag::Number(TEST_BLOCK_NUMBER).into())
             .await?;
 
         // Verify we got a response
