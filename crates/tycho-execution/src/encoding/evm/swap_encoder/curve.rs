@@ -61,6 +61,8 @@ impl CurveSwapEncoder {
                 "0xc9Fe0C63Af9A39402e8a5514f9c43Af0322b665F" => Ok(U8::from(2)),
                 // Unichain Core StableSwap factory
                 "0x604388Bb1159AFd21eB5191cE22b4DeCdEE2Ae22" => Ok(U8::from(1)),
+                // Monad Core StableSwap factory
+                "0x8271e06E5887FE5ba05234f5315c19f3Ec90E8aD" => Ok(U8::from(1)),
                 _ => Err(EncodingError::FatalError(format!(
                     "Unsupported curve factory address: {factory_address}"
                 ))),
