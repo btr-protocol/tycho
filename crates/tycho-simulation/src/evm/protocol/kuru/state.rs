@@ -17,7 +17,7 @@ use tycho_common::{
     models::token::Token,
     simulation::{
         errors::{SimulationError, TransitionError},
-        protocol_sim::{Balances, GetAmountOutResult, ProtocolSim},
+        protocol_sim::{Balances, GetAmountOutResult, PoolSwap, ProtocolSim, QueryPoolSwapParams},
     },
     Bytes,
 };
@@ -477,6 +477,10 @@ impl ProtocolSim for KuruState {
         Ok(())
     }
 
+    fn query_pool_swap(&self, params: &QueryPoolSwapParams) -> Result<PoolSwap, SimulationError> {
+        crate::evm::query_pool_swap::query_pool_swap(self, params)
+    }
+
     fn clone_box(&self) -> Box<dyn ProtocolSim> {
         Box::new(self.clone())
     }
@@ -496,6 +500,8 @@ impl ProtocolSim for KuruState {
 
 #[cfg(test)]
 mod tests {
+    use tycho_common::simulation::protocol_sim::{Price, SwapConstraint};
+
     use super::*;
 
     /// MON/USDC-shaped market: pp 1e8, sp 1e10, MON 18 dec, USDC 6 dec.
@@ -547,6 +553,31 @@ mod tests {
         let gross = u(100 * 10_000_000_000) * u(2_880_000) / u(10_000_000_000) * u(1_000_000) /
             u(100_000_000);
         assert_eq!(out, gross - mul_div_up(gross, u(2), u(BPS)).unwrap());
+    }
+
+    /// Buying MON with USDC at a trade price of at least 34.55 MON/USDC fills the 0.0289 level
+    /// (34.60) and part of the 0.029 level (34.48). Prices are in raw units: MON wei per USDC unit.
+    #[test]
+    fn query_pool_swap_trade_limit() {
+        let m = market();
+        let (usdc, mon) = (tok(&m.quote, 6), tok(&m.base, 18));
+        let swap = m
+            .query_pool_swap(&QueryPoolSwapParams::new(
+                usdc,
+                mon,
+                SwapConstraint::TradeLimitPrice {
+                    limit: Price::new(BigUint::from(34_550_000_000_000u64), BigUint::from(1u32)),
+                    tolerance: 0f64,
+                    min_amount_in: None,
+                    max_amount_in: None,
+                },
+            ))
+            .unwrap();
+        let (amount_in, amount_out) = (swap.amount_in().clone(), swap.amount_out().clone());
+        assert!(amount_in > BigUint::ZERO);
+        // at least the whole first level (28.9 USDC)
+        assert!(amount_in >= BigUint::from(28_900_000u32), "{amount_in}");
+        assert!(amount_out * 100u32 >= amount_in * 3_455_000_000_000_000u64);
     }
 
     #[test]
