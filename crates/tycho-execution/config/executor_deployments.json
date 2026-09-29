@@ -277,6 +277,26 @@
     }
   },
   "monad": {
+    "uniswap_v3": { "contract": "UniswapV3Executor", "args": [] },
+    "uniswap_v4": {
+      "contract": "UniswapV4Executor",
+      "args": [
+        "0x188d586ddcf52439676ca21a244753fa19f9ea8e",
+        "0x0000000aa232009084Bd71A5797d089AA4Edfad4"
+      ]
+    },
+    "vm:balancer_v3": { "contract": "BalancerV3Executor", "args": [] },
+    "vm:curve": {
+      "contract": "CurveExecutor",
+      "args": [
+        "0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE",
+        "0x0000000000000000000000000000000000000000"
+      ]
+    },
+    "native_wrapper": {
+      "contract": "NativeWrapExecutor",
+      "args": ["0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A"]
+    },
     "kuru": { "contract": "KuruExecutor", "args": [] }
   }
 }
