@@ -1,0 +1,16 @@
+[package]
+name = "monad-hanji"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "monad_hanji"
+crate-type = ["cdylib"]
+
+[dependencies]
+substreams = "0.5.22"
+substreams-ethereum = "0.9.13"
+tycho-substreams = "0.8.1"
+anyhow = "1.0.95"
+hex = "0.4.3"
+itertools = "0.10.5"
