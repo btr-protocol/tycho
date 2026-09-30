@@ -47,7 +47,7 @@ tycho-integration-test = { path = "crates/tycho-integration-test", version = "0.
 tycho-execution        = { path = "crates/tycho-execution",        version = "0.430.0" }
 # BTR AIMM pricer (pure std, bit-exact mirror of the Solidity), behind the `btr-aimm` feature. Private
 # repo: cargo fetches it to resolve even with the feature off, so every build needs an ssh key.
-btr-core               = { git = "ssh://git@github.com/btr-protocol/core.git", rev = "dc35781c6a37b7c458de8136c2e96bb2f418c16d" }
+btr-core               = { git = "ssh://git@github.com/btr-protocol/core.git", rev = "f668ec4545243c4910f31cf966fa06ef31569f8c" }
 
 # --- Serialization/Deserialization ---
 serde = { version = "1.0.204", features = ["rc", "derive"] }

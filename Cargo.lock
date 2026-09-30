@@ -2622,7 +2622,7 @@ dependencies = [
 [[package]]
 name = "btr-core"
 version = "0.1.0"
-source = "git+ssh://git@github.com/btr-protocol/core.git?rev=dc35781c6a37b7c458de8136c2e96bb2f418c16d#dc35781c6a37b7c458de8136c2e96bb2f418c16d"
+source = "git+ssh://git@github.com/btr-protocol/core.git?rev=f668ec4545243c4910f31cf966fa06ef31569f8c#f668ec4545243c4910f31cf966fa06ef31569f8c"
 
 [[package]]
 name = "bumpalo"
