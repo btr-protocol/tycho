@@ -1,6 +1,6 @@
 pub use map_pool_created::map_pools_created;
 pub use map_protocol_changes::map_protocol_changes;
-pub use map_snapshot::map_snapshot;
+pub use map_snapshot::*;
 pub use store_pools::store_pools;
 use substreams_ethereum::pb::eth::v2::TransactionTrace;
 

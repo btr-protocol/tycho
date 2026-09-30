@@ -50,15 +50,16 @@ pub trait SnapshotSource: Send + Sync {
         to: u64,
     ) -> Result<Vec<pb::ProtocolComponent>, ExtractionError>;
 
-    /// Returns the module parameters that let the protocol's package stream from `block + 1`
-    /// without processing earlier blocks, given the snapshot at `block`. A package whose modules
-    /// hold no state built from history needs none.
-    fn stream_params(
+    /// Returns the rows that seed the protocol's package through its `map_snapshot_<i>` modules
+    /// so it can stream from `block + 1` without processing earlier blocks, given the snapshot at
+    /// `block`. The format of a row is the package's. A package whose modules hold no state built
+    /// from history needs none.
+    fn snapshot_rows(
         &self,
         block: u64,
         components: &[ProtocolComponent],
         states: &[ProtocolComponentState],
-    ) -> Result<HashMap<String, String>, ExtractionError>;
+    ) -> Result<Vec<String>, ExtractionError>;
 
     /// Returns the attributes and balances of `components` at `block`, as the protocol's package
     /// would have accumulated them by then.
@@ -291,15 +292,48 @@ pub async fn bootstrap(
     Ok((components, states))
 }
 
+/// Largest parameter value one snapshot chunk module takes.
+const MAX_CHUNK_BYTES: usize = 64 * 1024;
+
+/// Packs snapshot `rows`, sorted, into chunk parameters `block=<block + 1>&rows=<row>,...` of at
+/// most `MAX_CHUNK_BYTES` each.
+pub fn snapshot_chunks(block: u64, mut rows: Vec<String>) -> Result<Vec<String>, ExtractionError> {
+    rows.sort();
+    let prefix = format!("block={}&rows=", block + 1);
+    let mut values = vec![prefix.clone()];
+    for row in rows {
+        if prefix.len() + row.len() > MAX_CHUNK_BYTES {
+            return Err(ExtractionError::Setup(format!(
+                "Snapshot row of {} bytes exceeds a chunk",
+                row.len()
+            )));
+        }
+        let value = values
+            .last_mut()
+            .expect("values starts non-empty");
+        if value.len() == prefix.len() {
+            value.push_str(&row);
+        } else if value.len() + 1 + row.len() <= MAX_CHUNK_BYTES {
+            value.push(',');
+            value.push_str(&row);
+        } else {
+            values.push(format!("{prefix}{row}"));
+        }
+    }
+    Ok(values)
+}
+
 /// Makes `package` stream from `block + 1` on top of a snapshot at `block`: every module starts
-/// at `block + 1`, so no store replays earlier blocks, and each module named in `params` gets that
-/// value as its `params` input.
+/// at `block + 1`, so no store replays earlier blocks, and the snapshot `rows` go to the package's
+/// chunk modules `map_snapshot_0..` as `block=<block + 1>&rows=<row>,...`, sorted so that the
+/// parameters and module hashes are the same on every start. A chunk holds at most
+/// `MAX_CHUNK_BYTES`; unused chunks get empty parameters.
 ///
-/// Errors if a module named in `params` is missing or takes no parameters.
+/// Errors if the rows do not fit the package's chunk modules.
 pub fn start_package_after(
     package: &mut Package,
     block: u64,
-    params: &HashMap<String, String>,
+    rows: Vec<String>,
 ) -> Result<(), ExtractionError> {
     let modules = package
         .modules
@@ -308,24 +342,39 @@ pub fn start_package_after(
     for module in &mut modules.modules {
         module.initial_block = module.initial_block.max(block + 1);
     }
-    for (name, value) in params {
-        let input = modules
-            .modules
-            .iter_mut()
-            .find(|module| &module.name == name)
-            .and_then(|module| {
-                module
-                    .inputs
-                    .iter_mut()
-                    .find_map(|input| match &mut input.input {
-                        Some(module_input::Input::Params(params)) => Some(params),
-                        _ => None,
-                    })
-            })
-            .ok_or_else(|| {
-                ExtractionError::Setup(format!("Package module {name} takes no parameters"))
-            })?;
-        input.value = value.clone();
+    let mut chunks: Vec<_> = modules
+        .modules
+        .iter_mut()
+        .filter_map(|module| {
+            let index: usize = module
+                .name
+                .strip_prefix("map_snapshot_")?
+                .parse()
+                .ok()?;
+            let params = module
+                .inputs
+                .iter_mut()
+                .find_map(|input| match &mut input.input {
+                    Some(module_input::Input::Params(params)) => Some(params),
+                    _ => None,
+                })?;
+            Some((index, params))
+        })
+        .collect();
+    chunks.sort_by_key(|(index, _)| *index);
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let values = snapshot_chunks(block, rows)?;
+    if values.len() > chunks.len() {
+        return Err(ExtractionError::Setup(format!(
+            "Snapshot needs {} chunks of {MAX_CHUNK_BYTES} bytes; the package has {} map_snapshot_<i> modules",
+            values.len(),
+            chunks.len()
+        )));
+    }
+    for ((_, params), value) in chunks.into_iter().zip(values) {
+        params.value = value;
     }
     Ok(())
 }
@@ -421,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn test_start_package_after_moves_modules_and_sets_params() {
+    fn test_start_package_after_moves_modules_and_chunks_rows() {
         use crate::pb::sf::substreams::v1::{module, Module, Modules};
         let module = |name: &str, initial_block: u64, params: bool| Module {
             name: name.to_string(),
@@ -434,29 +483,50 @@ mod tests {
                 .collect(),
             ..Default::default()
         };
-        let mut package = Package {
+        let package = || Package {
             modules: Some(Modules {
-                modules: vec![module("seed", 10, true), module("late", 500, false)],
+                modules: vec![
+                    module("map_snapshot_1", 10, true),
+                    module("map_snapshot_0", 10, true),
+                    module("late", 500, false),
+                ],
                 ..Default::default()
             }),
             ..Default::default()
         };
-        let params = HashMap::from([("seed".to_string(), "block=101".to_string())]);
+        let params = |package: &Package| -> Vec<String> {
+            package
+                .modules
+                .as_ref()
+                .unwrap()
+                .modules
+                .iter()
+                .filter_map(|m| match &m.inputs.first()?.input {
+                    Some(module_input::Input::Params(p)) => Some(p.value.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
 
-        start_package_after(&mut package, 100, &params).unwrap();
+        let mut small = package();
+        start_package_after(&mut small, 100, vec!["bb".to_string(), "aa".to_string()]).unwrap();
+        let modules = &small.modules.as_ref().unwrap().modules;
+        assert_eq!((modules[0].initial_block, modules[2].initial_block), (101, 500));
+        assert_eq!(params(&small), vec!["".to_string(), "block=101&rows=aa,bb".to_string()]);
 
-        let modules = &package
-            .modules
-            .as_ref()
-            .unwrap()
-            .modules;
-        assert_eq!((modules[0].initial_block, modules[1].initial_block), (101, 500));
-        assert!(matches!(
-            &modules[0].inputs[0].input,
-            Some(module_input::Input::Params(p)) if p.value == "block=101"
-        ));
-        let bad = HashMap::from([("late".to_string(), String::new())]);
-        assert!(start_package_after(&mut package, 100, &bad).is_err());
+        // Rows fill chunk 0 up to the limit, then spill into chunk 1.
+        let row = "a".repeat(MAX_CHUNK_BYTES / 2);
+        let mut large = package();
+        start_package_after(&mut large, 100, vec![row.clone(), row.clone()]).unwrap();
+        let [second, first] = &params(&large)[..] else { panic!() };
+        assert_eq!(
+            (first, second),
+            (&format!("block=101&rows={row}"), &format!("block=101&rows={row}"))
+        );
+        assert!(start_package_after(&mut package(), 100, vec![row.clone(); 3]).is_err());
+        assert!(
+            start_package_after(&mut package(), 100, vec!["a".repeat(MAX_CHUNK_BYTES)]).is_err()
+        );
     }
 
     #[test]

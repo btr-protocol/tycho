@@ -23,12 +23,90 @@ binaries:
     file: ../target/wasm32-unknown-unknown/release/ethereum_uniswap_v3_logs_only.wasm
 
 modules:
-  - name: map_snapshot
+  - name: map_snapshot_0
     kind: map
     initialBlock: 26324014
     inputs:
       - params: string
       - source: sf.substreams.v1.Clock
+    output:
+      type: proto:uniswap.v3.SnapshotPools
+
+  - name: map_snapshot_1
+    kind: map
+    initialBlock: 26324014
+    inputs:
+      - params: string
+      - source: sf.substreams.v1.Clock
+    output:
+      type: proto:uniswap.v3.SnapshotPools
+
+  - name: map_snapshot_2
+    kind: map
+    initialBlock: 26324014
+    inputs:
+      - params: string
+      - source: sf.substreams.v1.Clock
+    output:
+      type: proto:uniswap.v3.SnapshotPools
+
+  - name: map_snapshot_3
+    kind: map
+    initialBlock: 26324014
+    inputs:
+      - params: string
+      - source: sf.substreams.v1.Clock
+    output:
+      type: proto:uniswap.v3.SnapshotPools
+
+  - name: map_snapshot_4
+    kind: map
+    initialBlock: 26324014
+    inputs:
+      - params: string
+      - source: sf.substreams.v1.Clock
+    output:
+      type: proto:uniswap.v3.SnapshotPools
+
+  - name: map_snapshot_5
+    kind: map
+    initialBlock: 26324014
+    inputs:
+      - params: string
+      - source: sf.substreams.v1.Clock
+    output:
+      type: proto:uniswap.v3.SnapshotPools
+
+  - name: map_snapshot_6
+    kind: map
+    initialBlock: 26324014
+    inputs:
+      - params: string
+      - source: sf.substreams.v1.Clock
+    output:
+      type: proto:uniswap.v3.SnapshotPools
+
+  - name: map_snapshot_7
+    kind: map
+    initialBlock: 26324014
+    inputs:
+      - params: string
+      - source: sf.substreams.v1.Clock
+    output:
+      type: proto:uniswap.v3.SnapshotPools
+
+  - name: map_snapshot
+    kind: map
+    initialBlock: 26324014
+    inputs:
+      - map: map_snapshot_0
+      - map: map_snapshot_1
+      - map: map_snapshot_2
+      - map: map_snapshot_3
+      - map: map_snapshot_4
+      - map: map_snapshot_5
+      - map: map_snapshot_6
+      - map: map_snapshot_7
     output:
       type: proto:uniswap.v3.SnapshotPools
 
@@ -107,5 +185,12 @@ modules:
       type: proto:tycho.evm.v1.BlockChanges
 
 params:
-  map_snapshot: ""
+  map_snapshot_0: ""
+  map_snapshot_1: ""
+  map_snapshot_2: ""
+  map_snapshot_3: ""
+  map_snapshot_4: ""
+  map_snapshot_5: ""
+  map_snapshot_6: ""
+  map_snapshot_7: ""
   map_pools_created: "factory_address=dB1d10011AD0Ff90774D0C6Bb92e5C5c8b4461F7&protocol_type_name=uniswap_v3_pool"

@@ -6,6 +6,7 @@ pub mod contract;
 pub mod entrypoint;
 pub mod models;
 pub mod pb;
+pub mod snapshot;
 
 #[cfg(test)]
 pub mod testing;

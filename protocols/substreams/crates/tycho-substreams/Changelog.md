@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.10.0
+
+### Added
+
+- `snapshot`: row parsing and the `snapshot_modules!` macro, which declares the chunk modules
+  `map_snapshot_0..7` and their merge `map_snapshot`. An indexer bootstrapped from a snapshot at
+  block N passes the snapshot through their parameters, at most 64 KiB each, so the package's
+  stores start from it at N+1.
+
 ## 0.9.0
 
 ### Added

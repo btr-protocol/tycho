@@ -210,14 +210,14 @@ fn pool_address(component: &ProtocolComponent) -> Result<Address, ExtractionErro
 
 #[async_trait]
 impl SnapshotSource for UniswapV3Source {
-    /// Passes every pool with its tokens and tick to the package's `map_snapshot` module, which
-    /// seeds `store_pools` and `store_pool_current_tick`.
-    fn stream_params(
+    /// Passes every pool as `<pool>:<token0>:<token1>:<tick>` to the package's `map_snapshot`,
+    /// which seeds `store_pools` and `store_pool_current_tick`.
+    fn snapshot_rows(
         &self,
         block: u64,
         components: &[ProtocolComponent],
         states: &[ProtocolComponentState],
-    ) -> Result<HashMap<String, String>, ExtractionError> {
+    ) -> Result<Vec<String>, ExtractionError> {
         let ticks: HashMap<&str, i32> = states
             .iter()
             .filter_map(|state| {
@@ -228,7 +228,7 @@ impl SnapshotSource for UniswapV3Source {
                 ))
             })
             .collect();
-        let mut pools = components
+        components
             .iter()
             .map(|component| {
                 let tick = ticks
@@ -252,12 +252,7 @@ impl SnapshotSource for UniswapV3Source {
                     hex::encode(token1)
                 ))
             })
-            .collect::<Result<Vec<_>, _>>()?;
-        pools.sort();
-        Ok(HashMap::from([(
-            "map_snapshot".to_string(),
-            format!("block={}&pools={}", block + 1, pools.join(",")),
-        )]))
+            .collect()
     }
 
     async fn components(
@@ -878,13 +873,18 @@ mod tests {
             .state(&components, start.into())
             .await
             .unwrap();
-        let params = source
-            .stream_params(start, &components, &start_states)
-            .unwrap();
+        let params = crate::extractor::bootstrap::snapshot_chunks(
+            start,
+            source
+                .snapshot_rows(start, &components, &start_states)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(params.len(), 1, "fixture snapshot spans several chunks");
         let bootstrap_case = case_json(
             "bootstrap",
             start,
-            &params["map_snapshot"],
+            &params[0],
             &components,
             &start_states,
             &pool_logs,
@@ -1005,7 +1005,7 @@ mod tests {
     }
 
     #[test]
-    fn test_stream_params_lists_sorted_pools_with_ticks() {
+    fn test_snapshot_rows_list_pools_with_ticks() {
         let rpc = EthereumRpcClient::new("http://127.0.0.1:1").unwrap();
         let source = UniswapV3Source::new(
             UniswapV3Config {
@@ -1031,16 +1031,16 @@ mod tests {
                 HashMap::new(),
             )
         };
-        let params = source
-            .stream_params(
+        let rows = source
+            .snapshot_rows(
                 9,
                 &[component("0xbb"), component("0xaa")],
                 &[state("0xaa", -3), state("0xbb", 70000)],
             )
             .unwrap();
-        assert_eq!(params["map_snapshot"], "block=10&pools=aa:0a:0b:-3,bb:0a:0b:70000");
+        assert_eq!(rows, vec!["bb:0a:0b:70000", "aa:0a:0b:-3"]);
         assert!(source
-            .stream_params(9, &[component("0xcc")], &[])
+            .snapshot_rows(9, &[component("0xcc")], &[])
             .is_err());
     }
 

@@ -157,8 +157,10 @@ With `bootstrap: { block: N, source: {...} }` on an extractor and no cursor in t
 (factory logs over HyperSync when `hypersync_url` and `HYPERSYNC_API_KEY` are set, `eth_getLogs`
 otherwise), reads their state at N with Multicall3, and feeds it to the extractor as block N, so
 token loading, buffering and the DB write follow the normal path. The stream then starts at N+1:
-`start_package_after` moves every module's `initialBlock` to N+1 and sets the module parameters
-`SnapshotSource::stream_params` derives from the snapshot, so no store replays earlier blocks. On
+`start_package_after` moves every module's `initialBlock` to N+1 and packs the rows
+`SnapshotSource::snapshot_rows` derives from the snapshot into the package's `map_snapshot_<i>`
+chunk modules (<= 64 KiB of parameters each, `tycho_substreams::snapshot_modules!`), so no store
+replays earlier blocks. On
 a restart the parameters come from the DB state at N, so the module hashes stay the same. The
 Uniswap V3 source reads ticks with `lens/TickScanner.sol` injected through an `eth_call` state
 override, falling back to per-word reads when the RPC rejects overrides.

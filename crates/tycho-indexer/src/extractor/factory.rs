@@ -389,8 +389,8 @@ impl ExtractorFactory {
                     .indexed_snapshot(config.block)
                     .await?
             };
-            let params = source.stream_params(config.block, &components, &states)?;
-            stream_start = Some((config.block, params));
+            let rows = source.snapshot_rows(config.block, &components, &states)?;
+            stream_start = Some((config.block, rows));
             let check_block = config.block + config.verify_after;
             if extractor
                 .get_last_processed_block()
@@ -407,8 +407,8 @@ impl ExtractorFactory {
             }
         }
 
-        if let Some((block, params)) = &stream_start {
-            start_package_after(&mut spkg, *block, params)?;
+        if let Some((block, rows)) = stream_start {
+            start_package_after(&mut spkg, block, rows)?;
         }
 
         // Determine the start block.

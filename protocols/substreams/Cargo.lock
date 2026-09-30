@@ -1372,7 +1372,7 @@ dependencies = [
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
  "substreams-helper 0.0.2",
- "tycho-substreams 0.9.0",
+ "tycho-substreams 0.10.0",
 ]
 
 [[package]]
@@ -1977,7 +1977,7 @@ dependencies = [
  "prost 0.11.9",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "tycho-substreams 0.8.1",
+ "tycho-substreams 0.10.0",
 ]
 
 [[package]]
@@ -3573,8 +3573,9 @@ dependencies = [
 
 [[package]]
 name = "tycho-substreams"
-version = "0.9.0"
+version = "0.10.0"
 dependencies = [
+ "anyhow",
  "base64 0.22.1",
  "ethabi 18.0.0",
  "hex",

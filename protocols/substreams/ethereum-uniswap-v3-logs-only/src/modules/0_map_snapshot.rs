@@ -1,53 +1,29 @@
-use anyhow::{anyhow, bail, Context};
-use substreams::pb::substreams::Clock;
+use anyhow::Context;
+use tycho_substreams::snapshot::{fields, hex_field, rows};
 
 use crate::pb::uniswap::v3::{Pool, SnapshotPool, SnapshotPools};
 
-/// Emits the pools of a state snapshot on the block the stream starts at, so the stores that key
-/// events and ticks by pool start from the snapshot instead of from the factory's deployment.
-///
-/// `params` is empty for a replay from deployment. An indexer that bootstraps from a snapshot at
-/// block N passes `block=<N+1>&pools=<pool>:<token0>:<token1>:<tick>,...`, addresses in hex.
-#[substreams::handlers::map]
-pub fn map_snapshot(params: String, clock: Clock) -> Result<SnapshotPools, anyhow::Error> {
-    snapshot_pools(&params, clock.number)
-}
+// The pools of a state snapshot, emitted on the block the stream starts at, so the stores that key
+// events and ticks by pool start from the snapshot instead of from the factory's deployment. A row
+// is `<pool>:<token0>:<token1>:<tick>`, addresses in hex.
+tycho_substreams::snapshot_modules!(SnapshotPools, snapshot_pools);
 
 pub(crate) fn snapshot_pools(params: &str, block: u64) -> Result<SnapshotPools, anyhow::Error> {
-    if params.is_empty() {
-        return Ok(SnapshotPools::default());
-    }
-    let (mut start, mut pools) = (None, "");
-    for pair in params.split('&') {
-        match pair.split_once('=') {
-            Some(("block", value)) => start = Some(value.parse::<u64>().context("block")?),
-            Some(("pools", value)) => pools = value,
-            _ => bail!("unexpected snapshot parameter {pair:?}"),
-        }
-    }
-    if start.ok_or_else(|| anyhow!("snapshot parameters without block"))? != block {
-        return Ok(SnapshotPools::default());
-    }
-    let pools = pools
-        .split(',')
-        .filter(|pool| !pool.is_empty())
-        .map(|pool| {
-            let fields: Vec<&str> = pool.split(':').collect();
-            let [address, token0, token1, tick] = fields[..] else {
-                bail!("snapshot pool {pool:?} is not <pool>:<token0>:<token1>:<tick>");
-            };
-            let hex = |value: &str| hex::decode(value.trim_start_matches("0x")).context("hex");
+    let pools = rows(params, block)?
+        .into_iter()
+        .map(|row| {
+            let [address, token0, token1, tick] = fields(row)?;
             Ok(SnapshotPool {
                 pool: Some(Pool {
-                    address: hex(address)?,
-                    token0: hex(token0)?,
-                    token1: hex(token1)?,
+                    address: hex_field(address)?,
+                    token0: hex_field(token0)?,
+                    token1: hex_field(token1)?,
                     created_tx_hash: vec![],
                 }),
                 tick: tick.parse().context("tick")?,
             })
         })
-        .collect::<Result<_, _>>()?;
+        .collect::<Result<_, anyhow::Error>>()?;
     Ok(SnapshotPools { pools })
 }
 
@@ -57,7 +33,7 @@ mod tests {
 
     #[test]
     fn test_snapshot_pools_only_on_start_block() {
-        let params = "block=7&pools=0xaa:bb:cc:-5,dd:ee:ff:12";
+        let params = "block=7&rows=0xaa:bb:cc:-5,dd:ee:ff:12";
         let pools = snapshot_pools(params, 7).unwrap().pools;
         assert_eq!(pools.len(), 2);
         assert_eq!(
@@ -80,6 +56,6 @@ mod tests {
             .unwrap()
             .pools
             .is_empty());
-        assert!(snapshot_pools("block=7&pools=aa:bb", 7).is_err());
+        assert!(snapshot_pools("block=7&rows=aa:bb", 7).is_err());
     }
 }
