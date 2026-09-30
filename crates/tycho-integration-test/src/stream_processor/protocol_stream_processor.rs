@@ -9,6 +9,8 @@ use tycho_common::{
     models::{token::Token, Chain},
     Bytes,
 };
+#[cfg(feature = "btr-aimm")]
+use tycho_simulation::evm::protocol::btr_aimm::state::BtrAimmState;
 use tycho_simulation::{
     evm::{
         decoder::StreamDecodeError,
@@ -460,6 +462,10 @@ impl ProtocolStreamProcessor {
             }
             "kuru" => {
                 stream = stream.exchange::<KuruState>("kuru", tvl_filter.clone(), None);
+            }
+            #[cfg(feature = "btr-aimm")]
+            "btr_aimm" => {
+                stream = stream.exchange::<BtrAimmState>("btr_aimm", tvl_filter.clone(), None);
             }
             "ring_swap_v2" => {
                 stream =

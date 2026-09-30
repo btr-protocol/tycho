@@ -2620,6 +2620,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "btr-core"
+version = "0.1.0"
+source = "git+ssh://git@github.com/btr-protocol/core.git?rev=dc35781c6a37b7c458de8136c2e96bb2f418c16d#dc35781c6a37b7c458de8136c2e96bb2f418c16d"
+
+[[package]]
 name = "bumpalo"
 version = "3.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9957,6 +9962,7 @@ dependencies = [
  "async-trait",
  "balancer-maths-rust",
  "base64 0.22.1",
+ "btr-core",
  "chrono",
  "clap",
  "criterion",
