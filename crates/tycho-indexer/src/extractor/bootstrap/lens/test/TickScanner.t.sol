@@ -25,6 +25,24 @@ contract MockPool {
     }
 }
 
+/// Serves `MockPool` state for many pools the way the V4 `StateView` does.
+contract MockStateView {
+    mapping(bytes32 => MockPool) public pools;
+
+    function setPool(bytes32 poolId, MockPool pool) external {
+        pools[poolId] = pool;
+    }
+
+    function getTickBitmap(bytes32 poolId, int16 word) external view returns (uint256) {
+        return pools[poolId].tickBitmap(word);
+    }
+
+    function getTickLiquidity(bytes32 poolId, int24 tick) external view returns (uint128, int128) {
+        (, int128 net,,,,,,) = pools[poolId].ticks(tick);
+        return (1, net);
+    }
+}
+
 contract TickScannerTest {
     TickScanner private scanner = new TickScanner();
 
@@ -59,6 +77,22 @@ contract TickScannerTest {
     function test_scan_rejects_bad_range() external {
         try scanner.scan(address(0), 60, 5, 3) {
             revert("accepted");
+        } catch {}
+    }
+
+    function test_scan_v4_reads_state_view() external {
+        MockPool pool = new MockPool();
+        pool.setTick(-600, 60, 7);
+        pool.setTick(15360, 60, -7);
+        MockStateView stateView = new MockStateView();
+        stateView.setPool(bytes32(uint256(1)), pool);
+        (int24[] memory ticks, int128[] memory nets) =
+            scanner.scanV4(address(stateView), bytes32(uint256(1)), 60, -58, 57);
+        require(ticks.length == 2, "count");
+        require(ticks[0] == -600 && nets[0] == 7, "lower");
+        require(ticks[1] == 15360 && nets[1] == -7, "upper");
+        try scanner.scanV4(address(stateView), bytes32(0), 60, 0, 0) {
+            revert("accepted zero id");
         } catch {}
     }
 }

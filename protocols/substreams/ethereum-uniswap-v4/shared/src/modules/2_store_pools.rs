@@ -1,13 +1,25 @@
-use std::str;
-
 use substreams::store::{StoreNew, StoreSetIfNotExists, StoreSetIfNotExistsProto};
 use tycho_substreams::models::BlockEntityChanges;
 
-use crate::pb::uniswap::v4::Pool;
+use crate::pb::uniswap::v4::{Pool, SnapshotPools};
 
 #[substreams::handlers::store]
-pub fn store_pools(pools_created: BlockEntityChanges, store: StoreSetIfNotExistsProto<Pool>) {
-    // Store pools. Required so the next maps can match any event to a known pool by their address
+pub fn store_pools(
+    snapshot: SnapshotPools,
+    pools_created: BlockEntityChanges,
+    store: StoreSetIfNotExistsProto<Pool>,
+) {
+    // Store pools. Required so the next maps can match any event to a known pool by their id.
+    for seeded in snapshot.pools {
+        let key = seeded.store_key();
+        store.set_if_not_exists(
+            0,
+            key,
+            &seeded
+                .pool
+                .expect("store_key checked the pool"),
+        );
+    }
 
     for change in pools_created.changes {
         for component_change in &change.component_changes {

@@ -15,6 +15,24 @@ pub struct Pool {
     #[prost(bytes="vec", tag="4")]
     pub created_tx_hash: ::prost::alloc::vec::Vec<u8>,
 }
+/// A pool that existed before the stream started, with its price at the snapshot block.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SnapshotPool {
+    #[prost(message, optional, tag="1")]
+    pub pool: ::core::option::Option<Pool>,
+    #[prost(int32, tag="2")]
+    pub tick: i32,
+    #[prost(string, tag="3")]
+    pub sqrt_price_x96: ::prost::alloc::string::String,
+}
+/// The pools an indexer bootstrapped from a state snapshot passes to the stream.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct SnapshotPools {
+    #[prost(message, repeated, tag="1")]
+    pub pools: ::prost::alloc::vec::Vec<SnapshotPool>,
+}
 /// A struct describing a transaction.
 #[allow(clippy::derive_partial_eq_without_eq)]
 #[derive(Clone, PartialEq, ::prost::Message)]

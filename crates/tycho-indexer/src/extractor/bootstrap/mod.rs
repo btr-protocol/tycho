@@ -36,7 +36,9 @@ use crate::{
 };
 
 pub mod logs;
+pub mod ticks;
 pub mod uniswap_v3;
+pub mod uniswap_v4;
 
 /// Reads a protocol's components and their absolute state from the chain.
 #[async_trait]
@@ -68,6 +70,17 @@ pub trait SnapshotSource: Send + Sync {
         components: &[ProtocolComponent],
         block: BlockId,
     ) -> Result<Vec<ProtocolComponentState>, ExtractionError>;
+
+    /// Returns the on-chain state that verification compares the indexed state of `components`
+    /// with at `block`. Defaults to `state`; a source whose balances the package accumulates in
+    /// a way no read reproduces exactly leaves them out.
+    async fn expected_state(
+        &self,
+        components: &[ProtocolComponent],
+        block: BlockId,
+    ) -> Result<Vec<ProtocolComponentState>, ExtractionError> {
+        self.state(components, block).await
+    }
 }
 
 /// Extractor option to start from a state snapshot.
@@ -125,6 +138,7 @@ fn default_verify_sample() -> usize {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SnapshotSourceConfig {
     UniswapV3(uniswap_v3::UniswapV3Config),
+    UniswapV4(uniswap_v4::UniswapV4Config),
 }
 
 impl BootstrapConfig {
@@ -154,6 +168,15 @@ impl BootstrapConfig {
         match &self.source {
             SnapshotSourceConfig::UniswapV3(config) => {
                 Ok(Arc::new(uniswap_v3::UniswapV3Source::new(
+                    config.clone(),
+                    rpc,
+                    logs,
+                    self.calls_per_request,
+                    self.concurrency,
+                )))
+            }
+            SnapshotSourceConfig::UniswapV4(config) => {
+                Ok(Arc::new(uniswap_v4::UniswapV4Source::new(
                     config.clone(),
                     rpc,
                     logs,

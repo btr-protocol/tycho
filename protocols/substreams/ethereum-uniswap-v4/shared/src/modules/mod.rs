@@ -2,6 +2,9 @@ use substreams_ethereum::pb::eth::v2::TransactionTrace;
 
 use crate::pb::uniswap::v4::Transaction;
 
+#[path = "0_map_snapshot.rs"]
+pub mod map_snapshot;
+
 #[path = "2_store_pools.rs"]
 pub mod store_pools;
 
@@ -24,6 +27,9 @@ pub mod map_store_ticks;
 pub mod map_store_liquidity;
 
 pub mod uni_math;
+
+#[cfg(test)]
+mod replay_tests;
 
 impl From<TransactionTrace> for Transaction {
     fn from(value: TransactionTrace) -> Self {
