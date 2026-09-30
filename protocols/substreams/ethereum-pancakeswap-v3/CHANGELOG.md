@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.2.0
+
+- Emit tick net liquidity, pool balances, and the liquidity changes of mints and burns as
+  `ChangeType::Delta` instead of absolute values read from additive stores, as
+  `ethereum-uniswap-v3-logs-only` v0.2.0 does. The `store_pools_balances`,
+  `store_ticks_liquidity` and `store_liquidity` modules are removed. A tick whose net liquidity
+  returns to zero keeps a zero attribute instead of being deleted.
+- Add the snapshot modules `map_snapshot_0..7` and `map_snapshot`. With empty parameters, the
+  default, they emit nothing. An indexer bootstrapped from a state snapshot at block N passes rows
+  `<pool>:<token0>:<token1>:<fee>:<tick>`, and `store_pools` and `store_pool_current_tick` start
+  from them at N+1, so the stream processes no block before N+1.
+- A mint or burn on a pool whose tick is unknown fails the module instead of guessing.
+- Depend on the in-repo `tycho-substreams` and `substreams-helper` crates.
+
 ## v0.1.4
 
 - Add the Monad PancakeSwap V3 manifest (factory `0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865`, first `PoolCreated` at block 25819360).
