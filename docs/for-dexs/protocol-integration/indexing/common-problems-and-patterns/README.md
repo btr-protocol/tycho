@@ -27,7 +27,7 @@ The DCI allows you to specify external contract call information, which it will 
 
 ### Using relative component balances
 
-For some protocols, absolute component balances are not easily obtainable. Instead, balance deltas/changes are observed. Since absolute balances are expected by Tycho, it is recommended to use a balance store to track current balances and apply deltas as the occur. See [Normalizing relative ERC20 Balances](normalizing-relative-erc20-balances.md).
+For some protocols, absolute component balances are not easily obtainable. Instead, balance deltas/changes are observed. Either track current balances in a balance store and emit absolute values, or emit the deltas with `ChangeType::Delta` and let the indexer apply them. See [Normalizing relative ERC20 Balances](normalizing-relative-erc20-balances.md).
 
 ### Vaults/Singleton contracts
 

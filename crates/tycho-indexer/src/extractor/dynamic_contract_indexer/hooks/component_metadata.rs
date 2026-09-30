@@ -864,36 +864,6 @@ impl RpcTransport {
         Self::new(endpoint, "eth_call".to_string(), params)
     }
 
-    pub(super) fn multicall(
-        endpoint: String,
-        calls: Vec<(Address, Bytes)>,
-        block: Option<String>,
-    ) -> Self {
-        // Create multicall3 aggregate call data
-        // Function selector for aggregate3((address,bool,bytes)[])
-        let selector = hex::decode("82ad56cb").unwrap();
-        let call_data = selector;
-
-        // Encode array of calls
-        // This is simplified - in production you'd use proper ABI encoding
-        let _encoded_calls = calls
-            .iter()
-            .map(|(target, data)| {
-                serde_json::json!({
-                    "target": format!("0x{}", hex::encode(target.as_ref())),
-                    "allowFailure": true,
-                    "callData": format!("0x{}", hex::encode(data.as_ref()))
-                })
-            })
-            .collect::<Vec<_>>();
-
-        // Multicall3 contract address (same on most chains)
-        let multicall_address =
-            Address::from(hex::decode("cA11bde05977b3631167028862bE2a173976CA11").unwrap());
-
-        Self::eth_call(endpoint, multicall_address, Bytes::from(call_data), block)
-    }
-
     pub(super) fn params(&self) -> &Vec<serde_json::Value> {
         &self.params
     }

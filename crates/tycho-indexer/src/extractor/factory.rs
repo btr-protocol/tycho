@@ -25,6 +25,7 @@ use tycho_storage::postgres::cache::CachedGateway;
 
 use crate::{
     extractor::{
+        bootstrap::{bootstrap, start_package_after, BootstrapConfig, SnapshotCheck},
         chain_state::ChainState,
         dynamic_contract_indexer::{
             dci::DynamicContractIndexer, hooks::hooks_dci_builder::UniswapV4HookDCIBuilder,
@@ -83,6 +84,9 @@ pub struct ExtractorConfig {
     post_processor: Option<String>,
     #[serde(default)]
     pub(super) max_restarts: Option<u32>,
+    /// Starts the extractor from a state snapshot instead of from `start_block`.
+    #[serde(default)]
+    pub bootstrap: Option<BootstrapConfig>,
 }
 
 impl ExtractorConfig {
@@ -118,6 +122,7 @@ impl ExtractorConfig {
             post_processor,
             dci_plugin,
             max_restarts,
+            bootstrap: None,
         }
     }
 
@@ -333,7 +338,7 @@ impl ExtractorFactory {
                 self.chain_state,
                 self.config.name.clone(),
                 self.protocol_cache.clone(),
-                protocol_types,
+                protocol_types.clone(),
                 self.token_pre_processor.clone(),
                 post_processor,
                 dci_plugin,
@@ -347,7 +352,7 @@ impl ExtractorFactory {
         let content = std::fs::read(&self.config.spkg)
             .with_context(|| format_err!("read package from file '{}'", self.config.spkg))
             .map_err(|err| ExtractionError::SubstreamsError(err.to_string()))?;
-        let spkg = Package::decode(content.as_ref())
+        let mut spkg = Package::decode(content.as_ref())
             .context("decode spkg")
             .map_err(|err| ExtractionError::SubstreamsError(err.to_string()))?;
 
@@ -356,6 +361,55 @@ impl ExtractorFactory {
                 .await
                 .map_err(|err| ExtractionError::SubstreamsError(err.to_string()))?,
         );
+
+        let mut stream_start = None;
+        if let Some(config) = &self.config.bootstrap {
+            let source = config.build_source(&self.rpc_client)?;
+            let (components, states) = if extractor
+                .get_last_processed_block()
+                .await
+                .is_none()
+            {
+                let from = u64::try_from(self.config.start_block).map_err(|_| {
+                    ExtractionError::Setup("start_block must not be negative".to_string())
+                })?;
+                bootstrap(
+                    extractor.as_ref(),
+                    source.as_ref(),
+                    &self.rpc_client,
+                    self.config.chain,
+                    &self.config.name,
+                    &protocol_types,
+                    from,
+                    config.block,
+                )
+                .await?
+            } else {
+                extractor
+                    .indexed_snapshot(config.block)
+                    .await?
+            };
+            let rows = source.snapshot_rows(config.block, &components, &states)?;
+            stream_start = Some((config.block, rows));
+            let check_block = config.block + config.verify_after;
+            if extractor
+                .get_last_processed_block()
+                .await
+                .is_some_and(|block| block.number < check_block)
+            {
+                extractor
+                    .arm_snapshot_check(SnapshotCheck {
+                        block: check_block,
+                        sample: config.verify_sample,
+                        source,
+                    })
+                    .await;
+            }
+        }
+
+        if let Some((block, rows)) = stream_start {
+            start_package_after(&mut spkg, block, rows)?;
+        }
 
         // Determine the start block.
         //

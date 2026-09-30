@@ -1,3 +1,4 @@
+use num_bigint::{BigInt, Sign};
 use std::collections::{HashMap, HashSet};
 use substreams_ethereum::pb::eth::v2::{self as sf, StorageChange};
 
@@ -181,10 +182,34 @@ impl TransactionChangesBuilder {
 
     /// Updates a components balances
     ///
-    /// Overwrites any previous balance changes of the component if present.
+    /// Overwrites any previous balance change of the same component and token, except for a
+    /// `ChangeType::Delta` change: it adds to a previous delta, or to a previous absolute balance
+    /// which then stays absolute.
+    ///
+    /// ## Panics
+    /// If a delta makes a previous absolute balance negative.
     pub fn add_balance_change(&mut self, change: &BalanceChange) {
+        let key = (change.component_id.clone(), change.token.clone());
+        if let Some(existing) = self.balance_changes.get_mut(&key) {
+            if change.change == i32::from(ChangeType::Delta) {
+                let delta = BigInt::from_signed_bytes_be(&change.balance);
+                if existing.change == i32::from(ChangeType::Delta) {
+                    existing.balance = (BigInt::from_signed_bytes_be(&existing.balance) + delta)
+                        .to_signed_bytes_be();
+                } else {
+                    let balance = BigInt::from_bytes_be(Sign::Plus, &existing.balance) + delta;
+                    assert!(
+                        balance.sign() != Sign::Minus,
+                        "balance delta makes the balance of token 0x{} negative",
+                        hex::encode(&change.token)
+                    );
+                    existing.balance = balance.to_bytes_be().1;
+                }
+                return;
+            }
+        }
         self.balance_changes
-            .insert((change.component_id.clone(), change.token.clone()), change.clone());
+            .insert(key, change.clone());
     }
 
     /// Adds a new entrypoint to the transaction. It adds to the set of already existing
@@ -480,6 +505,20 @@ impl InterimEntityChanges {
         {
             self.attributes.remove(&attr.name);
             return;
+        }
+
+        // A delta adds to a value set earlier in this transaction instead of replacing it.
+        if attr.change == i32::from(ChangeType::Delta) {
+            if let Some(existing) = self.attributes.get_mut(&attr.name) {
+                let delta = BigInt::from_signed_bytes_be(&attr.value);
+                let (base, change) = match existing.change() {
+                    ChangeType::Deletion => (BigInt::default(), ChangeType::Creation),
+                    other => (BigInt::from_signed_bytes_be(&existing.value), other),
+                };
+                existing.value = (base + delta).to_signed_bytes_be();
+                existing.change = change.into();
+                return;
+            }
         }
 
         // Otherwise, add the attribute to the map.
@@ -931,5 +970,83 @@ mod test {
         let tx_changes = builder.build();
         // Should be None because creation followed by deletion cancels out
         assert!(tx_changes.is_none());
+    }
+
+    fn int_attr(name: &str, value: i64, change: ChangeType) -> Attribute {
+        Attribute {
+            name: name.to_string(),
+            value: num_bigint::BigInt::from(value).to_signed_bytes_be(),
+            change: change.into(),
+        }
+    }
+
+    fn built_attr(builder: TransactionChangesBuilder) -> (i64, ChangeType) {
+        let attr = builder.build().unwrap().entity_changes[0].attributes[0].clone();
+        let value = num_bigint::BigInt::from_signed_bytes_be(&attr.value);
+        (i64::try_from(value).unwrap(), attr.change())
+    }
+
+    #[rstest]
+    #[case::deltas_sum(ChangeType::Delta, 5, (2, ChangeType::Delta))]
+    #[case::delta_applies_to_update(ChangeType::Update, 5, (2, ChangeType::Update))]
+    #[case::delta_applies_to_creation(ChangeType::Creation, 5, (2, ChangeType::Creation))]
+    #[case::delta_after_deletion_starts_at_zero(ChangeType::Deletion, 5, (-3, ChangeType::Creation))]
+    fn test_delta_attribute_folds_into_earlier_change(
+        #[case] first: ChangeType,
+        #[case] first_value: i64,
+        #[case] expected: (i64, ChangeType),
+    ) {
+        let mut builder = TransactionChangesBuilder::new(&super::Transaction::default());
+        for attr in [int_attr("a", first_value, first), int_attr("a", -3, ChangeType::Delta)] {
+            builder.add_entity_change(&EntityChanges {
+                component_id: "c".to_string(),
+                attributes: vec![attr],
+            });
+        }
+        assert_eq!(built_attr(builder), expected);
+    }
+
+    #[test]
+    fn test_absolute_attribute_replaces_delta() {
+        let mut builder = TransactionChangesBuilder::new(&super::Transaction::default());
+        for attr in [int_attr("a", 4, ChangeType::Delta), int_attr("a", 9, ChangeType::Update)] {
+            builder.add_entity_change(&EntityChanges {
+                component_id: "c".to_string(),
+                attributes: vec![attr],
+            });
+        }
+        assert_eq!(built_attr(builder), (9, ChangeType::Update));
+    }
+
+    fn balance(value: i64, change: ChangeType) -> super::BalanceChange {
+        super::BalanceChange {
+            token: vec![1],
+            balance: num_bigint::BigInt::from(value).to_signed_bytes_be(),
+            component_id: b"c".to_vec(),
+            change: change.into(),
+        }
+    }
+
+    #[rstest]
+    #[case::deltas_sum(balance(-2, ChangeType::Delta), num_bigint::BigInt::from(5).to_signed_bytes_be(), ChangeType::Delta)]
+    #[case::delta_applies_to_absolute(balance(10, ChangeType::Unspecified), vec![17], ChangeType::Unspecified)]
+    fn test_delta_balance_folds_into_earlier_change(
+        #[case] first: super::BalanceChange,
+        #[case] expected: Vec<u8>,
+        #[case] expected_change: ChangeType,
+    ) {
+        let mut builder = TransactionChangesBuilder::new(&super::Transaction::default());
+        builder.add_balance_change(&first);
+        builder.add_balance_change(&balance(7, ChangeType::Delta));
+        let built = builder.build().unwrap().balance_changes[0].clone();
+        assert_eq!((built.change(), built.balance), (expected_change, expected));
+    }
+
+    #[test]
+    #[should_panic(expected = "negative")]
+    fn test_delta_balance_below_zero_panics() {
+        let mut builder = TransactionChangesBuilder::new(&super::Transaction::default());
+        builder.add_balance_change(&balance(1, ChangeType::Unspecified));
+        builder.add_balance_change(&balance(-2, ChangeType::Delta));
     }
 }

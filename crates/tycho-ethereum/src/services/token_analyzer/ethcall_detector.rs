@@ -145,7 +145,7 @@ impl EthCallDetector {
 
         let raw: AlloyBytes = match self
             .rpc
-            .eth_call_with_state_overrides(tx, block_tag, overrides)
+            .eth_call_with_state_overrides(tx, block_tag.into(), overrides)
             .await
         {
             Ok(raw) => raw,

@@ -9,6 +9,17 @@ message Pool {
   bytes created_tx_hash = 4;
 }
 
+// A pool that existed before the stream started, with its tick at the snapshot block.
+message SnapshotPool {
+  Pool pool = 1;
+  int32 tick = 2;
+}
+
+// The pools an indexer bootstrapped from a state snapshot passes to the stream.
+message SnapshotPools {
+  repeated SnapshotPool pools = 1;
+}
+
 // A struct describing a transaction.
 message Transaction {
   // The transaction hash.

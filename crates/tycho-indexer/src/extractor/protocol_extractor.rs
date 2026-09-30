@@ -5,6 +5,7 @@ use std::{
     sync::Arc,
 };
 
+use alloy::{primitives::B256, rpc::types::BlockId};
 use async_trait::async_trait;
 use chrono::{Duration, NaiveDateTime};
 use deepsize::DeepSizeOf;
@@ -29,7 +30,7 @@ use tycho_common::{
     },
     storage::{
         BlockIdentifier, ChainGateway, ContractStateGateway, EntryPointGateway,
-        ExtractionStateGateway, ProtocolGateway, StorageError,
+        ExtractionStateGateway, ProtocolGateway, StorageError, Version,
     },
     traits::TokenPreProcessor,
     Bytes,
@@ -39,10 +40,12 @@ use tycho_storage::postgres::cache::CachedGateway;
 
 use crate::{
     extractor::{
+        bootstrap::{compare_states, SnapshotCheck},
         chain_state::ChainState,
+        deltas::{self, DeltaKeys, PriorState},
         models::BlockChanges,
         protocol_cache::{ProtocolDataCache, ProtocolMemoryCache},
-        reorg_buffer::{PurgeOutcome, ReorgBuffer},
+        reorg_buffer::{PurgeOutcome, ReorgBuffer, StateUpdateBufferEntry},
         BlockUpdateWithCursor, ExtractionError, Extractor, ExtractorExtension, ExtractorMsg,
     },
     pb::sf::substreams::{
@@ -92,6 +95,7 @@ pub struct ProtocolExtractor<G, T, E> {
     reorg_buffer: Mutex<ReorgBuffer<BlockUpdateWithCursor<BlockChanges>>>,
     partial_block_buffer: Mutex<PartialBlockBuffer>,
     dci_plugin: Option<Arc<Mutex<E>>>,
+    snapshot_check: Mutex<Option<SnapshotCheck>>,
 }
 
 impl<G, T, E> ProtocolExtractor<G, T, E>
@@ -157,6 +161,7 @@ where
                     reorg_buffer: Mutex::new(ReorgBuffer::new()),
                     partial_block_buffer: Mutex::new(None),
                     dci_plugin,
+                    snapshot_check: Mutex::new(None),
                 }
             }
             Ok((cursor, block_hash)) => {
@@ -202,6 +207,7 @@ where
                     reorg_buffer: Mutex::new(ReorgBuffer::new()),
                     partial_block_buffer: Mutex::new(None),
                     dci_plugin,
+                    snapshot_check: Mutex::new(None),
                 }
             }
             Err(err) => return Err(ExtractionError::Setup(err.to_string())),
@@ -261,6 +267,331 @@ where
             .collect();
         unknown.retain(|id| !in_db.contains(id));
         Ok(unknown)
+    }
+
+    /// Rewrites the delta attributes and balances of `msg` into absolute values.
+    ///
+    /// Prior values come from the pending partial block, then the reorg buffer, then the DB, so
+    /// a delta always applies to the state left by every block `msg` extends, reverted blocks
+    /// excluded. Errors if a delta names a component that no source knows: its prior state was
+    /// never indexed, so no absolute value can be derived.
+    async fn resolve_deltas(
+        &self,
+        msg: &mut tycho_pb::BlockChanges,
+    ) -> Result<(), ExtractionError> {
+        let keys = DeltaKeys::from_message(msg).map_err(ExtractionError::DecodeError)?;
+        if keys.is_empty() {
+            return Ok(());
+        }
+        let reorg_buffer = self.reorg_buffer.lock().await;
+        let partial = self.partial_block_buffer.lock().await;
+        let prior = self
+            .prior_state(&reorg_buffer, partial.as_ref(), &keys)
+            .await?;
+
+        let mut unresolved: HashSet<ComponentId> = keys
+            .attributes
+            .iter()
+            .filter(|key| !prior.attributes.contains_key(*key))
+            .map(|(c, _)| c.clone())
+            .chain(
+                keys.balances
+                    .iter()
+                    .filter(|key| {
+                        prior
+                            .balances
+                            .get(*key)
+                            .is_none_or(|b| b.is_empty())
+                    })
+                    .map(|(c, _)| c.clone()),
+            )
+            .collect();
+        let created = deltas::created_components(msg);
+        unresolved.retain(|id| !created.contains(id));
+        if let Some(p) = partial.as_ref() {
+            let in_partial = p.get_filtered_protocol_components(&unresolved);
+            unresolved.retain(|id| !in_partial.contains(id));
+        }
+        let unknown = self
+            .find_unknown_components(&reorg_buffer, unresolved)
+            .await?;
+        if !unknown.is_empty() {
+            return Err(ExtractionError::DecodeError(format!(
+                "Block {}: delta attributes or balances for components with no indexed state: \
+                 {unknown:?}. The extractor must start from the protocol's deployment or from a \
+                 snapshot.",
+                msg.block
+                    .as_ref()
+                    .map_or(0, |b| b.number)
+            )));
+        }
+
+        let block = msg
+            .block
+            .as_ref()
+            .map_or(0, |b| b.number);
+        deltas::resolve(msg, &keys, &prior)
+            .map_err(|e| ExtractionError::DecodeError(format!("Block {block}: {e}")))
+    }
+
+    /// Returns the latest value of each key at the tip of the reorg buffer, reading the buffer,
+    /// then the DB. A key maps to `None` when its latest buffered change deleted it, and is
+    /// absent when neither source holds a value.
+    async fn get_protocol_state(
+        &self,
+        reorg_buffer: &ReorgBuffer<BlockUpdateWithCursor<BlockChanges>>,
+        keys: &[(&ComponentId, &String)],
+    ) -> Result<HashMap<(ComponentId, String), Option<Bytes>>, ExtractionError> {
+        let (mut state, missing) = reorg_buffer.lookup_protocol_state(keys);
+        trace!(?missing, "Missing state keys after buffer lookup");
+        let missing_ids: Vec<&str> = missing
+            .iter()
+            .map(|(c_id, _)| c_id.as_str())
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
+        if missing_ids.is_empty() {
+            return Ok(state);
+        }
+        let db_states = self
+            .gateway
+            .inner
+            .get_protocol_states(&missing_ids)
+            .await?;
+        let db_states: HashMap<&str, &ProtocolComponentState> = db_states
+            .iter()
+            .map(|s| (s.component_id.as_str(), s))
+            .collect();
+        for (c_id, attr) in missing {
+            if let Some(value) = db_states
+                .get(c_id.as_str())
+                .and_then(|s| s.attributes.get(&attr))
+            {
+                state.insert((c_id, attr), Some(value.clone()));
+            }
+        }
+        Ok(state)
+    }
+
+    /// Returns the values `keys` hold before the next message: from `partial`, the pending
+    /// partial block, then the reorg buffer, then the DB. Keys without a value are absent, and
+    /// a balance missing from the DB maps to empty bytes.
+    async fn prior_state(
+        &self,
+        reorg_buffer: &ReorgBuffer<BlockUpdateWithCursor<BlockChanges>>,
+        partial: Option<&BlockChanges>,
+        keys: &DeltaKeys,
+    ) -> Result<PriorState, ExtractionError> {
+        let mut attr_keys: Vec<(&String, &String)> = keys
+            .attributes
+            .iter()
+            .map(|(c, a)| (c, a))
+            .collect();
+        let mut latest = partial
+            .map(|p| p.get_filtered_protocol_state_update(attr_keys.clone()))
+            .unwrap_or_default();
+        attr_keys.retain(|(c, a)| !latest.contains_key(&((*c).clone(), (*a).clone())));
+        latest.extend(
+            self.get_protocol_state(reorg_buffer, &attr_keys)
+                .await?,
+        );
+        let mut prior = PriorState {
+            attributes: latest
+                .into_iter()
+                .filter_map(|(key, value)| Some((key, value?)))
+                .collect(),
+            ..Default::default()
+        };
+
+        let mut balance_keys: Vec<(&String, &Bytes)> = keys
+            .balances
+            .iter()
+            .map(|(c, t)| (c, t))
+            .collect();
+        if let Some(p) = partial {
+            for (key, balance) in p.get_filtered_component_balance_update(balance_keys.clone()) {
+                prior
+                    .balances
+                    .insert(key, balance.balance);
+            }
+        }
+        balance_keys.retain(|(c, t)| {
+            !prior
+                .balances
+                .contains_key(&((*c).clone(), (*t).clone()))
+        });
+        for (c_id, balances) in self
+            .get_component_balances(reorg_buffer, &balance_keys)
+            .await?
+        {
+            for (token, balance) in balances {
+                prior
+                    .balances
+                    .insert((c_id.clone(), token), balance.balance);
+            }
+        }
+        Ok(prior)
+    }
+
+    /// Returns the components of this extractor's protocol system and their indexed state at the
+    /// end of block `block`.
+    pub async fn indexed_snapshot(
+        &self,
+        block: u64,
+    ) -> Result<(Vec<ProtocolComponent>, Vec<ProtocolComponentState>), ExtractionError> {
+        let states = self
+            .gateway
+            .inner
+            .get_protocol_states_at(block)
+            .await?;
+        let ids: Vec<ComponentId> = states
+            .iter()
+            .map(|s| s.component_id.clone())
+            .collect();
+        let components = self
+            .protocol_cache
+            .get_protocol_components(&self.protocol_system, &ids)
+            .await?
+            .into_values()
+            .collect();
+        Ok((components, states))
+    }
+
+    /// Schedules `check` to run when the extractor processes its block.
+    pub async fn arm_snapshot_check(&self, check: SnapshotCheck) {
+        *self.snapshot_check.lock().await = Some(check);
+    }
+
+    /// Runs the armed snapshot check once `block` reaches its block: compares the indexed state
+    /// of the components most recently changed in the reorg buffer with the snapshot source's
+    /// on-chain reads at `block`'s hash. The check stays armed while no component changed or
+    /// the read fails, for example because `block` was reorged out; a difference is an error.
+    async fn run_snapshot_check(&self, block: &Block) -> Result<(), ExtractionError> {
+        let Some(check) = self
+            .snapshot_check
+            .lock()
+            .await
+            .clone()
+            .filter(|check| block.number >= check.block)
+        else {
+            return Ok(());
+        };
+
+        let reorg_buffer = self.reorg_buffer.lock().await;
+        let mut ids: Vec<ComponentId> = Vec::new();
+        let mut keys = DeltaKeys::default();
+        for entry in reorg_buffer.history() {
+            for tx in entry
+                .block_update()
+                .txs_with_update
+                .iter()
+                .rev()
+            {
+                for (id, delta) in &tx.state_updates {
+                    if !ids.contains(id) {
+                        if ids.len() == check.sample {
+                            continue;
+                        }
+                        ids.push(id.clone());
+                    }
+                    keys.attributes.extend(
+                        delta
+                            .updated_attributes
+                            .keys()
+                            .chain(&delta.deleted_attributes)
+                            .map(|attr| (id.clone(), attr.clone())),
+                    );
+                }
+            }
+        }
+        if ids.is_empty() {
+            warn!(
+                block = block.number,
+                "No component changed since the snapshot; nothing to verify"
+            );
+            return Ok(());
+        }
+        let components: Vec<ProtocolComponent> = self
+            .protocol_cache
+            .get_protocol_components(&self.protocol_system, &ids)
+            .await?
+            .into_values()
+            .collect();
+        let block_id = BlockId::hash(B256::from_slice(&block.hash));
+        let expected = match check
+            .source
+            .state(&components, block_id)
+            .await
+        {
+            Ok(expected) => expected,
+            Err(err) => {
+                warn!(block = block.number, %err, "Snapshot check read failed; retrying on the next block");
+                return Ok(());
+            }
+        };
+        for state in self
+            .gateway
+            .inner
+            .get_protocol_states(
+                &ids.iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
+            )
+            .await?
+            .iter()
+            .chain(&expected)
+        {
+            keys.attributes.extend(
+                state
+                    .attributes
+                    .keys()
+                    .map(|attr| (state.component_id.clone(), attr.clone())),
+            );
+        }
+        keys.attributes
+            .retain(|(id, _)| ids.contains(id));
+        for component in &components {
+            keys.balances.extend(
+                component
+                    .tokens
+                    .iter()
+                    .map(|token| (component.id.clone(), token.clone())),
+            );
+        }
+        let prior = self
+            .prior_state(&reorg_buffer, None, &keys)
+            .await?;
+        drop(reorg_buffer);
+
+        let mut indexed: HashMap<ComponentId, ProtocolComponentState> = HashMap::new();
+        for ((id, attr), value) in prior.attributes {
+            indexed
+                .entry(id.clone())
+                .or_insert_with(|| ProtocolComponentState::new(&id, HashMap::new(), HashMap::new()))
+                .attributes
+                .insert(attr, value);
+        }
+        for ((id, token), value) in prior.balances {
+            indexed
+                .entry(id.clone())
+                .or_insert_with(|| ProtocolComponentState::new(&id, HashMap::new(), HashMap::new()))
+                .balances
+                .insert(token, value);
+        }
+        let mismatches = compare_states(&expected, &indexed);
+        if !mismatches.is_empty() {
+            error!(block = block.number, ?mismatches, "Indexed state differs from the chain");
+            return Err(ExtractionError::SnapshotVerification(format!(
+                "{} differences at block {} for {} components, first: {}",
+                mismatches.len(),
+                block.number,
+                ids.len(),
+                mismatches[..mismatches.len().min(5)].join("; ")
+            )));
+        }
+        info!(block = block.number, components = ids.len(), "Snapshot verified against the chain");
+        *self.snapshot_check.lock().await = None;
+        Ok(())
     }
 
     async fn is_first_message(&self) -> bool {
@@ -885,6 +1216,9 @@ where
         self.update_last_processed_block(msg.block.clone())
             .await;
 
+        self.run_snapshot_check(&msg.block)
+            .await?;
+
         self.periodically_report_metrics(&msg, is_syncing)
             .await;
 
@@ -1006,8 +1340,10 @@ where
             })?;
         let msg = {
             let msg = if data.type_url.ends_with("BlockChanges") {
-                let raw_msg = tycho_pb::BlockChanges::decode(data.value.as_slice())?;
+                let mut raw_msg = tycho_pb::BlockChanges::decode(data.value.as_slice())?;
                 trace!(?raw_msg, "Received BlockChanges message");
+                self.resolve_deltas(&mut raw_msg)
+                    .await?;
                 BlockChanges::try_from_message((
                     raw_msg,
                     &self.name,
@@ -1527,62 +1863,39 @@ where
 
         trace!("Reverted state keys {:?}", &reverted_protocol_state_keys_vec);
 
-        // Fetch previous values for every reverted states
-        // First search in the buffer
-        let (buffered_state, missing) =
-            reorg_buffer.lookup_protocol_state(&reverted_protocol_state_keys_vec);
-
-        // Then for every missing previous values in the buffer, get the data from our db
-        let missing_map: HashMap<String, Vec<String>> =
-            missing
-                .into_iter()
-                .fold(HashMap::new(), |mut acc, (c_id, key)| {
-                    acc.entry(c_id).or_default().push(key);
-                    acc
-                });
-
-        trace!("Missing state keys after buffer lookup {:?}", &missing_map);
-
-        let missing_components_states = self
-            .gateway
-            .inner
-            .get_protocol_states(
-                &missing_map
-                    .keys()
-                    .map(String::as_str)
-                    .collect::<Vec<&str>>(),
-            )
-            .await
-            .map_err(ExtractionError::Storage)?;
-
-        let mut not_found: HashMap<String, HashSet<String>> = HashMap::new();
-        let mut db_states: HashMap<(String, String), Bytes> = HashMap::new();
-
-        let states_by_id: HashMap<&str, &ProtocolComponentState> = missing_components_states
-            .iter()
-            .map(|state| (state.component_id.as_str(), state))
-            .collect();
+        let prior_state = self
+            .get_protocol_state(&reorg_buffer, &reverted_protocol_state_keys_vec)
+            .await?;
 
         // Misses below mean an upstream module emitted an Update/Deletion for an
         // attribute that never had a Creation, or a malformed delta held the attribute in
         // both sets and it never existed before the range. Either way no prior value
         // exists and the revert deletes it. Substreams output is external input — a miss
         // is a data-quality signal, not a reason to kill the extractor.
-        for (component_id, keys) in missing_map {
-            let state = states_by_id
-                .get(component_id.as_str())
-                .copied();
-            for key in keys {
-                if let Some(value) = state.and_then(|s| s.attributes.get(&key)) {
-                    db_states.insert((component_id.clone(), key), value.clone());
-                    continue;
-                }
+        let mut not_found: HashMap<String, HashSet<String>> = HashMap::new();
+        for &(c_id, attr) in &reverted_protocol_state_keys_vec {
+            if !prior_state.contains_key(&(c_id.clone(), attr.clone())) {
                 not_found
-                    .entry(component_id.clone())
+                    .entry(c_id.clone())
                     .or_default()
-                    .insert(key);
+                    .insert(attr.clone());
             }
         }
+        // A prior value the buffer holds as deleted reverts to a deletion.
+        let mut buffered_deletions: HashMap<String, HashSet<String>> = HashMap::new();
+        let prior_values: HashMap<(String, String), Bytes> = prior_state
+            .into_iter()
+            .filter_map(|((c_id, attr), value)| match value {
+                Some(value) => Some(((c_id, attr), value)),
+                None => {
+                    buffered_deletions
+                        .entry(c_id)
+                        .or_default()
+                        .insert(attr);
+                    None
+                }
+            })
+            .collect();
 
         let unknown_components = self
             .find_unknown_components(&reorg_buffer, not_found.keys().cloned())
@@ -1619,9 +1932,8 @@ where
 
         let empty = HashSet::<String>::new();
 
-        let mut state_deltas: HashMap<String, ProtocolComponentStateDelta> = db_states
+        let mut state_deltas: HashMap<String, ProtocolComponentStateDelta> = prior_values
             .into_iter()
-            .chain(buffered_state)
             .fold(HashMap::new(), |mut acc, ((c_id, key), value)| {
                 acc.entry(c_id.clone())
                     .or_insert_with(|| ProtocolComponentStateDelta {
@@ -1645,6 +1957,16 @@ where
                 .or_insert_with(|| {
                     ProtocolComponentStateDelta::new(c_id, HashMap::new(), deleted_keys.clone())
                 });
+        }
+
+        for (c_id, attrs) in buffered_deletions {
+            state_deltas
+                .entry(c_id.clone())
+                .or_insert_with(|| {
+                    ProtocolComponentStateDelta::new(&c_id, HashMap::new(), HashSet::new())
+                })
+                .deleted_attributes
+                .extend(attrs);
         }
 
         // Revert the attributes born inside the range that survived it by emitting
@@ -1835,6 +2157,13 @@ pub trait ExtractorGateway: Send + Sync {
     async fn get_protocol_states<'a>(
         &self,
         component_ids: &[&'a str],
+    ) -> Result<Vec<ProtocolComponentState>, StorageError>;
+
+    /// Returns the state of every component of this extractor's protocol system at the end of
+    /// block `block`.
+    async fn get_protocol_states_at(
+        &self,
+        block: u64,
     ) -> Result<Vec<ProtocolComponentState>, StorageError>;
 
     /// Returns the protocol components identified by `component_ids`.
@@ -2192,6 +2521,25 @@ impl ExtractorGateway for ExtractorPgGateway {
             .map(|state_data| state_data.entity)
     }
 
+    async fn get_protocol_states_at(
+        &self,
+        block: u64,
+    ) -> Result<Vec<ProtocolComponentState>, StorageError> {
+        let number = i64::try_from(block)
+            .map_err(|_| StorageError::Unexpected(format!("Block {block} exceeds i64")))?;
+        self.state_gateway
+            .get_protocol_states(
+                &self.chain,
+                Some(Version::from_block_number(self.chain, number)),
+                Some(self.name.clone()),
+                None,
+                true,
+                None,
+            )
+            .await
+            .map(|state_data| state_data.entity)
+    }
+
     /// Component ids are unique per chain, so the protocol system is left unconstrained.
     async fn get_protocol_components<'a>(
         &self,
@@ -2240,14 +2588,16 @@ mod test {
     };
 
     use ::tycho_protobuf::pb::tycho::evm::v1::{
-        Attribute, BlockChanges as PbBlockChanges, ChangeType as PbChangeType, EntityChanges,
-        ProtocolComponent as PbProtocolComponent, ProtocolType as PbProtocolType,
+        Attribute, BalanceChange, BlockChanges as PbBlockChanges, ChangeType as PbChangeType,
+        EntityChanges, ProtocolComponent as PbProtocolComponent, ProtocolType as PbProtocolType,
         TransactionChanges,
     };
     use float_eq::assert_float_eq;
     use futures03::FutureExt;
     use mockall::mock;
-    use tycho_common::{models::blockchain::TxWithChanges, traits::TokenOwnerFinding};
+    use tycho_common::{
+        models::blockchain::TxWithChanges, storage::WithTotal, traits::TokenOwnerFinding,
+    };
 
     use super::*;
     use crate::{
@@ -2278,12 +2628,22 @@ mod test {
         chain: Chain,
     ) -> ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>
     {
-        let protocol_types = HashMap::from([("pt_1".to_string(), ProtocolType::default())]);
         let protocol_cache = ProtocolMemoryCache::new(
             chain,
             chrono::Duration::seconds(900),
             Arc::new(MockGateway::new()),
         );
+        create_extractor_with_cache(gw, batch_size, chain, protocol_cache).await
+    }
+
+    async fn create_extractor_with_cache(
+        gw: MockExtractorGateway,
+        batch_size: usize,
+        chain: Chain,
+        protocol_cache: ProtocolMemoryCache,
+    ) -> ProtocolExtractor<MockExtractorGateway, MockTokenPreProcessor, MockExtractorExtension>
+    {
+        let protocol_types = HashMap::from([("pt_1".to_string(), ProtocolType::default())]);
         let mut preprocessor = MockTokenPreProcessor::new();
         preprocessor
             .expect_get_tokens()
@@ -4911,6 +5271,315 @@ mod test {
             delta.updated_attributes.get("tick"),
             Some(&Bytes::from(999_u64).lpad(32, 0)),
             "the released block must not serve the lookup"
+        );
+    }
+
+    fn signed(value: i64) -> Bytes {
+        num_bigint::BigInt::from(value)
+            .to_signed_bytes_be()
+            .into()
+    }
+
+    /// A transaction changing `pool_x`'s tick net-liquidity and token `0x01` balance by deltas.
+    fn delta_tx(block: u64, index: u64, liquidity: i64, balance: i64) -> TransactionChanges {
+        TransactionChanges {
+            tx: Some(pb_fixtures::pb_transactions(block, index)),
+            entity_changes: vec![EntityChanges {
+                component_id: "pool_x".to_string(),
+                attributes: vec![Attribute {
+                    name: "ticks/10/net-liquidity".to_string(),
+                    value: signed(liquidity).to_vec(),
+                    change: PbChangeType::Delta.into(),
+                }],
+            }],
+            balance_changes: vec![BalanceChange {
+                token: vec![1],
+                balance: signed(balance).to_vec(),
+                component_id: b"pool_x".to_vec(),
+                change: PbChangeType::Delta.into(),
+            }],
+            ..Default::default()
+        }
+    }
+
+    fn resolved(msg: &BlockAggregatedChanges) -> (Option<Bytes>, Option<Bytes>) {
+        (
+            msg.state_deltas
+                .get("pool_x")
+                .and_then(|d| {
+                    d.updated_attributes
+                        .get("ticks/10/net-liquidity")
+                        .cloned()
+                }),
+            msg.component_balances
+                .get("pool_x")
+                .and_then(|b| b.get(&Bytes::from(vec![1])))
+                .map(|b| b.balance.clone()),
+        )
+    }
+
+    /// Builds an extractor whose protocol cache serves `pool_x` and no token prices, so the TVL
+    /// step of balance-carrying blocks runs.
+    async fn create_delta_extractor(gw: MockExtractorGateway) -> TestExtractor {
+        let mut protocol_gw = MockGateway::new();
+        protocol_gw
+            .expect_get_token_prices()
+            .returning(|_| Box::pin(async { Ok(HashMap::new()) }));
+        protocol_gw
+            .expect_get_protocol_components()
+            .returning(|_, _, _, _, _| {
+                Box::pin(async {
+                    Ok(WithTotal {
+                        entity: vec![ProtocolComponent {
+                            id: "pool_x".to_string(),
+                            protocol_system: TEST_PROTOCOL.to_string(),
+                            protocol_type_name: "pt_1".to_string(),
+                            tokens: vec![Bytes::from(vec![1])],
+                            ..Default::default()
+                        }],
+                        total: Some(1),
+                    })
+                })
+            });
+        let protocol_cache = ProtocolMemoryCache::new(
+            Chain::Ethereum,
+            chrono::Duration::seconds(900),
+            Arc::new(protocol_gw),
+        );
+        create_extractor_with_cache(gw, 1, Chain::Ethereum, protocol_cache).await
+    }
+
+    async fn delta_block(
+        extractor: &TestExtractor,
+        block: u64,
+        txs: Vec<TransactionChanges>,
+    ) -> ExtractorMsg {
+        extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                PbBlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(block)),
+                    changes: txs,
+                    ..Default::default()
+                },
+                Some(format!("cursor@{block}").as_str()),
+                Some(1),
+            ))
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_deltas_resolve_revert_and_reapply() {
+        let extractor = create_delta_extractor(revert_test_gateway()).await;
+        full_block(&extractor, 1, 1, vec![]).await;
+
+        // Block 2 creates `pool_x` and applies deltas in a later tx of the same block.
+        let mut creation = component_creation_tx(2, 0, "pool_x", &[]);
+        creation.entity_changes.clear();
+        let msg = delta_block(&extractor, 2, vec![creation, delta_tx(2, 1, 100, 50)]).await;
+        assert_eq!(resolved(&msg), (Some(signed(100)), Some(Bytes::from(vec![50]))));
+
+        let msg = delta_block(&extractor, 3, vec![delta_tx(3, 0, -30, 5)]).await;
+        assert_eq!(resolved(&msg), (Some(signed(70)), Some(Bytes::from(vec![55]))));
+
+        let msg =
+            delta_block(&extractor, 4, vec![delta_tx(4, 0, 7, 1), delta_tx(4, 1, 3, 1)]).await;
+        assert_eq!(resolved(&msg), (Some(signed(80)), Some(Bytes::from(vec![57]))));
+
+        let revert = extractor
+            .handle_revert(undo_to(3))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved(&revert), (Some(signed(70)), Some(Bytes::from(vec![55]))));
+
+        // The re-streamed block 4 applies to the reverted state, not to the dropped block.
+        let msg = delta_block(&extractor, 4, vec![delta_tx(4, 0, 1, -55)]).await;
+        assert_eq!(resolved(&msg), (Some(signed(71)), Some(Bytes::from(vec![0]))));
+    }
+
+    #[tokio::test]
+    async fn test_deltas_resolve_against_pending_partial_block() {
+        let extractor = create_delta_extractor(revert_test_gateway()).await;
+        full_block(&extractor, 1, 1, vec![]).await;
+        let mut creation = component_creation_tx(2, 0, "pool_x", &[]);
+        creation.entity_changes.clear();
+        delta_block(&extractor, 2, vec![creation, delta_tx(2, 1, 100, 50)]).await;
+
+        partial_block(&extractor, 3, 0, 1, vec![delta_tx(3, 0, 20, 10)]).await;
+        let mut partial = pb_fixtures::pb_block_scoped_data(
+            PbBlockChanges {
+                block: Some(pb_fixtures::pb_blocks(3)),
+                changes: vec![delta_tx(3, 1, 1, 1)],
+                ..Default::default()
+            },
+            Some("cursor@3_p1"),
+            Some(1),
+        );
+        partial.partial_index = Some(1);
+        partial.is_partial = true;
+        let msg = extractor
+            .handle_tick_scoped_data(partial)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved(&msg), (Some(signed(121)), Some(Bytes::from(vec![61]))));
+    }
+
+    #[tokio::test]
+    async fn test_delta_resolves_against_db_state() {
+        let mut gw = MockExtractorGateway::new();
+        gw.expect_ensure_protocol_types()
+            .returning(|_| Ok(()));
+        gw.expect_get_cursor()
+            .returning(|| Ok(("cursor".into(), Bytes::default())));
+        gw.expect_get_block()
+            .returning(|_| Ok(Block::default()));
+        gw.expect_flushed_block_height()
+            .returning(|| None);
+        gw.expect_get_protocol_states()
+            .withf(|ids| ids == ["pool_x"])
+            .times(1)
+            .returning(|_| {
+                Ok(vec![ProtocolComponentState::new(
+                    "pool_x",
+                    HashMap::from([("ticks/10/net-liquidity".to_string(), signed(-40))]),
+                    HashMap::new(),
+                )])
+            });
+        // The TVL step asks for the balances the buffer already holds.
+        gw.expect_get_components_balances()
+            .withf(|ids| ids.is_empty())
+            .returning(|_| Ok(HashMap::new()));
+        gw.expect_get_components_balances()
+            .withf(|ids| ids == ["pool_x"])
+            .times(1)
+            .returning(|_| {
+                Ok(HashMap::from([(
+                    "pool_x".to_string(),
+                    HashMap::from([(
+                        Bytes::from(vec![1]),
+                        ComponentBalance {
+                            token: Bytes::from(vec![1]),
+                            balance: Bytes::from(vec![1, 0]),
+                            balance_float: 256.0,
+                            modify_tx: Bytes::default(),
+                            component_id: "pool_x".to_string(),
+                        },
+                    )]),
+                )]))
+            });
+        let extractor = create_delta_extractor(gw).await;
+
+        let msg = delta_block(&extractor, 1, vec![delta_tx(1, 0, 50, -6)]).await;
+        assert_eq!(resolved(&msg), (Some(signed(10)), Some(Bytes::from(vec![250]))));
+    }
+
+    #[tokio::test]
+    async fn test_delta_after_buffered_deletion_starts_from_zero() {
+        let extractor = create_delta_extractor(revert_test_gateway()).await;
+        full_block(&extractor, 1, 1, vec![]).await;
+        let mut creation = component_creation_tx(2, 0, "pool_x", &[]);
+        creation.entity_changes.clear();
+        delta_block(&extractor, 2, vec![creation, delta_tx(2, 1, 100, 50)]).await;
+        full_block(
+            &extractor,
+            3,
+            1,
+            vec![entity_change_tx(
+                3,
+                0,
+                "pool_x",
+                "ticks/10/net-liquidity",
+                0,
+                PbChangeType::Deletion,
+            )],
+        )
+        .await;
+
+        let msg = delta_block(&extractor, 4, vec![delta_tx(4, 0, 7, 1)]).await;
+
+        assert_eq!(resolved(&msg), (Some(signed(7)), Some(Bytes::from(vec![51]))));
+    }
+
+    #[tokio::test]
+    async fn test_revert_past_buffered_deletion_deletes() {
+        // The DB still holds the value the buffer deleted: the revert must not restore it.
+        let extractor = {
+            let mut gw = MockExtractorGateway::new();
+            gw.expect_ensure_protocol_types()
+                .returning(|_| Ok(()));
+            gw.expect_get_cursor()
+                .returning(|| Ok(("cursor".into(), Bytes::default())));
+            gw.expect_get_block()
+                .returning(|_| Ok(Block::default()));
+            gw.expect_flushed_block_height()
+                .returning(|| None);
+            gw.expect_get_contracts()
+                .returning(|_| Ok(Vec::new()));
+            gw.expect_get_protocol_states()
+                .returning(|_| {
+                    Ok(vec![ProtocolComponentState::new(
+                        "pool_x",
+                        HashMap::from([("tick".to_string(), Bytes::from(1_u64).lpad(32, 0))]),
+                        HashMap::new(),
+                    )])
+                });
+            gw.expect_get_protocol_components()
+                .returning(|_| Ok(Vec::new()));
+            gw.expect_get_components_balances()
+                .returning(|_| Ok(HashMap::new()));
+            gw.expect_get_account_balances()
+                .returning(|_| Ok(HashMap::new()));
+            create_extractor(gw).await
+        };
+        full_block(&extractor, 1, 1, vec![]).await;
+        full_block(
+            &extractor,
+            2,
+            1,
+            vec![entity_change_tx(2, 0, "pool_x", "tick", 0, PbChangeType::Deletion)],
+        )
+        .await;
+        full_block(
+            &extractor,
+            3,
+            1,
+            vec![entity_change_tx(3, 0, "pool_x", "tick", 5, PbChangeType::Update)],
+        )
+        .await;
+
+        let revert = extractor
+            .handle_revert(undo_to(2))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let delta = &revert.state_deltas["pool_x"];
+        assert!(delta.updated_attributes.is_empty(), "{delta:?}");
+        assert_eq!(delta.deleted_attributes, HashSet::from(["tick".to_string()]));
+    }
+
+    #[tokio::test]
+    async fn test_delta_on_unknown_component_errors() {
+        let extractor = create_extractor(revert_test_gateway()).await;
+        let err = extractor
+            .handle_tick_scoped_data(pb_fixtures::pb_block_scoped_data(
+                PbBlockChanges {
+                    block: Some(pb_fixtures::pb_blocks(1)),
+                    changes: vec![delta_tx(1, 0, 1, 1)],
+                    ..Default::default()
+                },
+                Some("cursor@1"),
+                Some(1),
+            ))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("no indexed state"),
+            "{err}"
         );
     }
 

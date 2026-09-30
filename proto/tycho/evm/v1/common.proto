@@ -35,6 +35,10 @@ enum ChangeType {
   CHANGE_TYPE_UPDATE = 1;
   CHANGE_TYPE_CREATION = 2;
   CHANGE_TYPE_DELETION = 3;
+  // The value is a signed big-endian integer that the indexer adds to the value last stored
+  // for the same key. The indexer stores and broadcasts the resulting absolute value. Every value
+  // of an attribute that receives deltas must be a signed big-endian integer.
+  CHANGE_TYPE_DELTA = 4;
 }
 
 // A custom struct representing an arbitrary attribute of a protocol component.
@@ -103,6 +107,9 @@ message BalanceChange {
   // The id of the component whose TVL is tracked.  Note: This MUST be utf8 encoded.
   // If the protocol component includes multiple contracts, the balance change must be aggregated to reflect how much tokens can be traded.
   bytes component_id = 3;
+  // CHANGE_TYPE_DELTA marks `balance` as a signed big-endian amount that the indexer adds to the
+  // stored balance. Any other value means `balance` is the absolute balance.
+  ChangeType change = 4;
 }
 
 // Native entities

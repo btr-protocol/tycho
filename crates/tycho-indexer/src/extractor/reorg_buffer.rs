@@ -202,7 +202,7 @@ where
 
     /// Iterates the buffered history newest to oldest: buffered blocks first, then
     /// retained committing blocks.
-    fn history(&self) -> impl Iterator<Item = &B> + '_ {
+    pub(crate) fn history(&self) -> impl Iterator<Item = &B> + '_ {
         self.block_messages.iter().rev().chain(
             self.committing_blocks
                 .iter()
@@ -464,7 +464,7 @@ pub(crate) trait StateUpdateBufferEntry: std::fmt::Debug {
     fn get_filtered_protocol_state_update(
         &self,
         keys: Vec<(&ProtocolStateIdType, &ProtocolStateKeyType)>,
-    ) -> HashMap<(ProtocolStateIdType, ProtocolStateKeyType), ProtocolStateValueType>;
+    ) -> HashMap<(ProtocolStateIdType, ProtocolStateKeyType), Option<ProtocolStateValueType>>;
 
     #[allow(clippy::mutable_key_type)]
     fn get_filtered_account_state_update(
@@ -492,15 +492,16 @@ impl<B> ReorgBuffer<B>
 where
     B: BlockScoped + StateUpdateBufferEntry + DeepSizeOf,
 {
-    /// Looks up buffered protocol state updates for the provided keys. Returns a map of updates and
-    /// a list of keys for which updates were not found in the buffered blocks.
+    /// Looks up the latest buffered protocol state for the provided keys. Returns a map from key
+    /// to its latest value, `None` when the latest buffered change deleted it, and the keys that no
+    /// buffered block touches.
     // Clippy thinks it is a complex type that is difficult to read
     #[allow(clippy::type_complexity)]
     pub fn lookup_protocol_state(
         &self,
         keys: &[(&ProtocolStateIdType, &ProtocolStateKeyType)],
     ) -> (
-        HashMap<(ProtocolStateIdType, ProtocolStateKeyType), ProtocolStateValueType>,
+        HashMap<(ProtocolStateIdType, ProtocolStateKeyType), Option<ProtocolStateValueType>>,
         Vec<(ProtocolStateIdType, ProtocolStateKeyType)>,
     ) {
         let mut res = HashMap::new();
@@ -961,9 +962,15 @@ mod test {
         assert_eq!(
             res,
             HashMap::from([
-                ((c_ids[0].clone(), new.clone()), Bytes::from(2_u64.to_be_bytes().to_vec())),
-                ((c_ids[0].clone(), reserve.clone()), Bytes::from(10_u64.to_be_bytes().to_vec())),
-                ((c_ids[1].clone(), reserve.clone()), Bytes::from(30_u64.to_be_bytes().to_vec()))
+                ((c_ids[0].clone(), new.clone()), Some(Bytes::from(2_u64.to_be_bytes().to_vec()))),
+                (
+                    (c_ids[0].clone(), reserve.clone()),
+                    Some(Bytes::from(10_u64.to_be_bytes().to_vec()))
+                ),
+                (
+                    (c_ids[1].clone(), reserve.clone()),
+                    Some(Bytes::from(30_u64.to_be_bytes().to_vec()))
+                )
             ])
         );
     }
@@ -1135,11 +1142,11 @@ mod test {
         assert!(missing.is_empty());
         assert_eq!(
             res.get(&(state1.clone(), new.clone())),
-            Some(&Bytes::from(2_u64.to_be_bytes().to_vec()))
+            Some(&Some(Bytes::from(2_u64.to_be_bytes().to_vec())))
         );
         assert_eq!(
             res.get(&(state1.clone(), reserve.clone())),
-            Some(&Bytes::from(10_u64.to_be_bytes().to_vec()))
+            Some(&Some(Bytes::from(10_u64.to_be_bytes().to_vec())))
         );
 
         // Balances resolve through the same history.
@@ -1163,7 +1170,7 @@ mod test {
             .any(|(c, a)| c == "State1" && a == "reserve"));
         assert_eq!(
             res.get(&(state1.clone(), new.clone())),
-            Some(&Bytes::from(2_u64.to_be_bytes().to_vec()))
+            Some(&Some(Bytes::from(2_u64.to_be_bytes().to_vec())))
         );
 
         // Releasing up to block 2 drops the rest; the lookups now miss.

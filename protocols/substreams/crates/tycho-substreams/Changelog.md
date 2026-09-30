@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.10.0
+
+### Added
+
+- `snapshot`: row parsing and the `snapshot_modules!` macro, which declares the chunk modules
+  `map_snapshot_0..7` and their merge `map_snapshot`. An indexer bootstrapped from a snapshot at
+  block N passes the snapshot through their parameters, at most 64 KiB each, so the package's
+  stores start from it at N+1.
+
+## 0.9.0
+
+### Added
+
+- `ChangeType::Delta`: an attribute or balance change whose value is a signed big-endian amount the
+  indexer adds to the stored value. `BalanceChange` gains a `change` field to carry it; absolute
+  balances keep the default.
+- `TransactionChangesBuilder` adds a delta to an earlier change of the same attribute or balance in
+  the transaction instead of replacing it.
+
 ## 0.8.1
 
 ### Fixed

@@ -961,6 +961,7 @@ pub mod fixtures {
                                 "d417ff54652c09bd9f31f216b1a2e5d1e28c1dce1ba840c40d16f2b4d09b5902"
                                     .as_bytes()
                                     .to_vec(),
+                            ..Default::default()
                         }],
                         ..Default::default()
                     },
@@ -1005,6 +1006,7 @@ pub mod fixtures {
                                     .to_string()
                                     .as_bytes()
                                     .to_vec(),
+                            ..Default::default()
                         }],
                         ..Default::default()
                     },
@@ -1057,11 +1059,13 @@ pub mod fixtures {
                             token: address_from_str(USDC_ADDRESS),
                             balance: 1_i32.to_be_bytes().to_vec(),
                             component_id: "pc_1".into(),
+                            ..Default::default()
                         },
                         BalanceChange {
                             token: address_from_str(WETH_ADDRESS),
                             balance: 1_i32.to_be_bytes().to_vec(),
                             component_id: "pc_1".into(),
+                            ..Default::default()
                         },
                     ],
                     ..Default::default()
@@ -1140,16 +1144,19 @@ pub mod fixtures {
                             token: address_from_str(USDC_ADDRESS),
                             balance: 20_i32.to_be_bytes().to_vec(),
                             component_id: "pc_2".into(),
+                            ..Default::default()
                         },
                         BalanceChange {
                             token: address_from_str(USDT_ADDRESS),
                             balance: 20_i32.to_be_bytes().to_vec(),
                             component_id: "pc_2".into(),
+                            ..Default::default()
                         },
                         BalanceChange {
                             token: address_from_str(USDC_ADDRESS),
                             balance: 10_i32.to_be_bytes().to_vec(),
                             component_id: "pc_1".into(),
+                            ..Default::default()
                         },
                     ],
                     ..Default::default()
@@ -1198,6 +1205,7 @@ pub mod fixtures {
                             token: address_from_str(USDC_ADDRESS),
                             balance: 1_i32.to_be_bytes().to_vec(),
                             component_id: "pc_2".into(),
+                            ..Default::default()
                         }],
                         ..Default::default()
                     },
@@ -1223,11 +1231,13 @@ pub mod fixtures {
                                 token: address_from_str(USDC_ADDRESS),
                                 balance: 100_i32.to_be_bytes().to_vec(),
                                 component_id: "pc_1".into(),
+                                ..Default::default()
                             },
                             BalanceChange {
                                 token: address_from_str(USDC_ADDRESS),
                                 balance: 2_i32.to_be_bytes().to_vec(),
                                 component_id: "pc_2".into(),
+                                ..Default::default()
                             },
                         ],
                         ..Default::default()
@@ -1317,16 +1327,19 @@ pub mod fixtures {
                             token: address_from_str(USDC_ADDRESS),
                             balance: 1_i32.to_be_bytes().to_vec(),
                             component_id: "pc_1".into(),
+                            ..Default::default()
                         },
                         BalanceChange {
                             token: address_from_str(USDC_ADDRESS),
                             balance: 1_i32.to_be_bytes().to_vec(),
                             component_id: "pc_3".into(),
+                            ..Default::default()
                         },
                         BalanceChange {
                             token: address_from_str(WETH_ADDRESS),
                             balance: 1_i32.to_be_bytes().to_vec(),
                             component_id: "pc_1".into(),
+                            ..Default::default()
                         },
                     ],
                     ..Default::default()
@@ -1440,6 +1453,7 @@ pub mod fixtures {
                             token: address_from_str(DAI_ADDRESS),
                             balance: 1_i32.to_be_bytes().to_vec(),
                             component_id: "Balance1".into(),
+                            ..Default::default()
                         }],
                         ..Default::default()
                     },
@@ -1489,6 +1503,7 @@ pub mod fixtures {
                         token: address_from_str(USDC_ADDRESS),
                         balance: 1_i32.to_be_bytes().to_vec(),
                         component_id: "pc_1".into(),
+                        ..Default::default()
                     }],
                     ..Default::default()
                 }],
@@ -1527,16 +1542,19 @@ pub mod fixtures {
                             token: address_from_str(USDC_ADDRESS),
                             balance: 1_i32.to_be_bytes().to_vec(),
                             component_id: "pc_2".into(),
+                            ..Default::default()
                         },
                         BalanceChange {
                             token: address_from_str(USDT_ADDRESS),
                             balance: 1_i32.to_be_bytes().to_vec(),
                             component_id: "pc_2".into(),
+                            ..Default::default()
                         },
                         BalanceChange {
                             token: address_from_str(WETH_ADDRESS),
                             balance: 1_i32.to_be_bytes().to_vec(),
                             component_id: "pc_1".into(),
+                            ..Default::default()
                         },
                     ],
                     ..Default::default()
@@ -1562,6 +1580,7 @@ pub mod fixtures {
                             token: address_from_str(USDC_ADDRESS),
                             balance: 3_i32.to_be_bytes().to_vec(),
                             component_id: "pc_2".into(),
+                            ..Default::default()
                         }],
                         ..Default::default()
                     },
@@ -1582,11 +1601,13 @@ pub mod fixtures {
                                 token: address_from_str(USDC_ADDRESS),
                                 balance: 99999_i32.to_be_bytes().to_vec(),
                                 component_id: "pc_2".into(),
+                                ..Default::default()
                             },
                             BalanceChange {
                                 token: address_from_str(WETH_ADDRESS),
                                 balance: 1000_i32.to_be_bytes().to_vec(),
                                 component_id: "pc_1".into(),
+                                ..Default::default()
                             },
                         ],
                         ..Default::default()
@@ -1664,11 +1685,13 @@ pub mod fixtures {
                                 token: address_from_str(USDC_ADDRESS),
                                 balance: 3000_i32.to_be_bytes().to_vec(),
                                 component_id: "pc_3".into(),
+                                ..Default::default()
                             },
                             BalanceChange {
                                 token: address_from_str(USDC_ADDRESS),
                                 balance: 1000_i32.to_be_bytes().to_vec(),
                                 component_id: "pc_1".into(),
+                                ..Default::default()
                             },
                         ],
                         ..Default::default()
@@ -1710,6 +1733,7 @@ pub mod fixtures {
                         token: address_from_str(WETH_ADDRESS),
                         balance: 1000_i32.to_be_bytes().to_vec(),
                         component_id: "pc_1".into(),
+                        ..Default::default()
                     }],
                     ..Default::default()
                 }],

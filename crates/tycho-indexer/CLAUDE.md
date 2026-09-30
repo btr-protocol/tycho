@@ -19,7 +19,12 @@ extractor/
   reorg_buffer.rs           ReorgBuffer — finality-aware block queue; chain-reorg purge
   models.rs                 Re-exports the block types (defined in tycho-common's models/blockchain.rs); merge helpers + test fixtures
   protocol_cache.rs         ProtocolMemoryCache — in-process token/component metadata cache
+  bootstrap/                Start from a state snapshot at a finalized block (`bootstrap` extractor option)
+    mod.rs                  SnapshotSource trait, config, block-N snapshot write, verification compare
+    logs.rs                 LogSource trait: eth_getLogs and HyperSync implementations
+    uniswap_v3.rs           Uniswap V3 / PancakeSwap V3 SnapshotSource (Multicall3 reads)
   chain_state.rs            ChainState — tracks current tip and finality horizon
+  deltas.rs                 Resolves CHANGE_TYPE_DELTA attributes and balances into absolute values
   u256_num.rs               U256 numeric utilities
   token_analysis_cron.rs    Background job: token quality / tax analysis
   dynamic_contract_indexer/ DCI optional extension (see below)
@@ -71,7 +76,12 @@ extension `E`. It is the single point that turns raw Substreams messages into ty
 
 1. Deserialize `BlockScopedData` → `BlockChanges` (tx-level state/balance deltas) via
    `tycho-protobuf`'s `TryFromMessage` conversions; its `DecodeError` converts into
-   `ExtractionError`.
+   `ExtractionError`. Before the conversion, `resolve_deltas` rewrites every
+   `CHANGE_TYPE_DELTA` attribute and balance into the absolute value it produces, reading the
+   prior value from earlier txs of the message, the pending partial block, the `ReorgBuffer`,
+   then the DB (see `deltas.rs`). A delta whose key has no prior value starts from zero; one
+   whose component is unknown everywhere fails the message. Buffers, DB and subscribers only
+   see absolute values, so reverts restore deltas like any other update.
 2. Run post-processor if configured.
 3. Call `E::process_block_update()` (DCI — see below).
 4. Fetch metadata for any new token addresses via `T` (ERC-20 symbol / decimals over RPC).
@@ -125,7 +135,8 @@ On `BlockUndoSignal(target_hash, target_number)` from Substreams:
    `protocol_component` table. `false` means an upstream module emitted state for a
    component Tycho never saw created. The extractor registers both label sets at zero at
    startup so the first miss is visible to `increase()`. Any hit means an upstream module
-   emitted an Update or Deletion for an attribute that never had a Creation.
+   emitted an Update or Deletion for an attribute that never had a Creation. An attribute whose
+   latest buffered change before the range is a deletion reverts as a deletion.
 4. If nothing was invalidated, only the cursor advances — no message is emitted. Otherwise
    a `BlockAggregatedChanges` with `revert = true` is broadcast.
 5. **No DB rollback is needed** — only finalized blocks ever reach the DB, so the persisted
@@ -138,6 +149,25 @@ extend the window's chain is an error that ends the pump and the process: only t
 replay can refill the window. On `ExtractorRestarted` the pump folds the window's committed
 blocks into the sink and clears it; the restarted extractor replays everything above its
 database cursor.
+
+## Snapshot bootstrap
+
+With `bootstrap: { block: N, source: {...} }` on an extractor and no cursor in the DB,
+`ExtractorFactory::build_runner` enumerates components with the protocol's `SnapshotSource`
+(factory logs over HyperSync when `hypersync_url` and `HYPERSYNC_API_KEY` are set, `eth_getLogs`
+otherwise), reads their state at N with Multicall3, and feeds it to the extractor as block N, so
+token loading, buffering and the DB write follow the normal path. The stream then starts at N+1:
+`start_package_after` moves every module's `initialBlock` to N+1 and packs the rows
+`SnapshotSource::snapshot_rows` derives from the snapshot into the package's `map_snapshot_<i>`
+chunk modules (<= 64 KiB of parameters each, `tycho_substreams::snapshot_modules!`), so no store
+replays earlier blocks. On
+a restart the parameters come from the DB state at N, so the module hashes stay the same. The
+Uniswap V3 source reads ticks with `lens/TickScanner.sol` injected through an `eth_call` state
+override, falling back to per-word reads when the RPC rejects overrides.
+While the extractor is below N + `verify_after`, it arms a `SnapshotCheck`: at that block it
+compares the indexed state of the most recently changed components with on-chain reads and fails
+with `SnapshotVerification` on any difference. Attributes must match exactly; indexed balances
+may trail `balanceOf` by dust, since packages derive them from events.
 
 ## Persistence
 

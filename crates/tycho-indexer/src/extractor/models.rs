@@ -137,7 +137,7 @@ impl StateUpdateBufferEntry for BlockChanges {
     fn get_filtered_protocol_state_update(
         &self,
         keys: Vec<(&ProtocolStateIdType, &ProtocolStateKeyType)>,
-    ) -> HashMap<(ProtocolStateIdType, ProtocolStateKeyType), ProtocolStateValueType> {
+    ) -> HashMap<(ProtocolStateIdType, ProtocolStateKeyType), Option<ProtocolStateValueType>> {
         // Convert keys to a HashSet for faster lookups
         let keys_set: HashSet<(&ComponentId, &AttrStoreKey)> = keys.into_iter().collect();
         let mut res = HashMap::new();
@@ -150,7 +150,15 @@ impl StateUpdateBufferEntry for BlockChanges {
                     .filter(|(attr, _)| keys_set.contains(&(component_id, attr)))
                 {
                     res.entry((component_id.clone(), attr.clone()))
-                        .or_insert(val.clone());
+                        .or_insert(Some(val.clone()));
+                }
+                for attr in protocol_update
+                    .deleted_attributes
+                    .iter()
+                    .filter(|attr| keys_set.contains(&(component_id, attr)))
+                {
+                    res.entry((component_id.clone(), attr.clone()))
+                        .or_insert(None);
                 }
             }
         }
@@ -743,9 +751,40 @@ mod test {
             filtered,
             HashMap::from([
                 // "reserve" in both txs: tx1 value (2000) wins over tx0 value (1000)
-                ((c_id.clone(), attr_reserve), Bytes::from(2000u64).lpad(32, 0)),
+                ((c_id.clone(), attr_reserve), Some(Bytes::from(2000u64).lpad(32, 0))),
                 // "fee" only in tx0: value (50) returned
-                ((c_id, attr_fee), Bytes::from(50u64).lpad(32, 0)),
+                ((c_id, attr_fee), Some(Bytes::from(50u64).lpad(32, 0))),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_block_changes_protocol_state_filter_reports_latest_deletion() {
+        let mut block_changes = block_changes_from_fixtures();
+        let (c_id, reserve, fee) = ("pool_0".to_string(), "reserve".to_string(), "fee".to_string());
+        block_changes
+            .txs_with_update
+            .push(TxWithChanges {
+                state_updates: HashMap::from([(
+                    c_id.clone(),
+                    ProtocolComponentStateDelta::new(
+                        &c_id,
+                        HashMap::new(),
+                        HashSet::from([reserve.clone()]),
+                    ),
+                )]),
+                tx: default_tx(),
+                ..Default::default()
+            });
+
+        let filtered = block_changes
+            .get_filtered_protocol_state_update(vec![(&c_id, &reserve), (&c_id, &fee)]);
+
+        assert_eq!(
+            filtered,
+            HashMap::from([
+                ((c_id.clone(), reserve), None),
+                ((c_id, fee), Some(Bytes::from(50u64).lpad(32, 0))),
             ])
         );
     }

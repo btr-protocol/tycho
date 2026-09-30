@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.3.0
+
+- Add `map_snapshot`. With empty parameters, the default, it emits nothing and the output is
+  unchanged. An indexer bootstrapped from a state snapshot at block N passes the snapshot's pools
+  and ticks, sets every module's `initialBlock` to N+1, and `store_pools` and
+  `store_pool_current_tick` start from them. The stream then processes no block before N+1.
+- A mint or burn is in range only when the pool's current tick says so. The v0.2.0 fallback that
+  guessed from the token amounts is removed, because the snapshot always provides the tick.
+
+- Add the Monad Uniswap V3 manifest (factory `0x204FAca1764B154221e35c0d20aBb3c525710498`, first
+  `PoolCreated` at block 32036467).
+
+## v0.2.0
+
+- Emit tick net liquidity, pool balances, and the liquidity changes of mints and burns as
+  `ChangeType::Delta` instead of absolute values read from additive stores. The indexer adds each
+  delta to the stored value, so the absolute values it stores match v0.1.4 when replayed from the
+  factory's deployment, and an indexer bootstrapped from a state snapshot at block N can stream
+  it from N+1. The `store_pools_balances`, `store_ticks_liquidity` and `store_liquidity` modules
+  are removed. `store_pools` and `store_pool_current_tick` remain and still build from the
+  manifest's `initialBlock`.
+- A tick whose net liquidity returns to zero now keeps a zero attribute instead of being deleted.
+- When `store_pool_current_tick` holds no tick for a pool, a mint or burn counts as in range when
+  it moves both tokens. This only happens when a manifest's `initialBlock` is later than the
+  pool's last `Initialize` or `Swap`.
+- Depend on the in-repo `tycho-substreams` and `substreams-helper` crates, which carry
+  `ChangeType::Delta`.
+
 ## v0.1.4
 
 - Take `protocol_type_name` as a `map_pools_created` parameter instead of hardcoding

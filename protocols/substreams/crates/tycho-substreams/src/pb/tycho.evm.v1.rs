@@ -112,6 +112,10 @@ pub struct BalanceChange {
     /// If the protocol component includes multiple contracts, the balance change must be aggregated to reflect how much tokens can be traded.
     #[prost(bytes="vec", tag="3")]
     pub component_id: ::prost::alloc::vec::Vec<u8>,
+    /// CHANGE_TYPE_DELTA marks `balance` as a signed big-endian amount that the indexer adds to the
+    /// stored balance. Any other value means `balance` is the absolute balance.
+    #[prost(enumeration="ChangeType", tag="4")]
+    pub change: i32,
 }
 // Native entities
 
@@ -314,6 +318,10 @@ pub enum ChangeType {
     Update = 1,
     Creation = 2,
     Deletion = 3,
+    /// The value is a signed big-endian integer that the indexer adds to the value last stored
+    /// for the same key. The indexer stores and broadcasts the resulting absolute value. Every value
+    /// of an attribute that receives deltas must be a signed big-endian integer.
+    Delta = 4,
 }
 impl ChangeType {
     /// String value of the enum field names used in the ProtoBuf definition.
@@ -326,6 +334,7 @@ impl ChangeType {
             ChangeType::Update => "CHANGE_TYPE_UPDATE",
             ChangeType::Creation => "CHANGE_TYPE_CREATION",
             ChangeType::Deletion => "CHANGE_TYPE_DELETION",
+            ChangeType::Delta => "CHANGE_TYPE_DELTA",
         }
     }
     /// Creates an enum from field names used in the ProtoBuf definition.
@@ -335,6 +344,7 @@ impl ChangeType {
             "CHANGE_TYPE_UPDATE" => Some(Self::Update),
             "CHANGE_TYPE_CREATION" => Some(Self::Creation),
             "CHANGE_TYPE_DELETION" => Some(Self::Deletion),
+            "CHANGE_TYPE_DELTA" => Some(Self::Delta),
             _ => None,
         }
     }

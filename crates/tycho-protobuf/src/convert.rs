@@ -119,6 +119,13 @@ impl TryFromMessage for ComponentBalance {
 
     fn try_from_message(args: Self::Args<'_>) -> Result<Self, DecodeError> {
         let (msg, tx) = args;
+        if msg.change() == pb::ChangeType::Delta {
+            return Err(DecodeError::Decode(
+                "Unresolved CHANGE_TYPE_DELTA balance: deltas must be resolved into absolute \
+                 balances before conversion"
+                    .to_owned(),
+            ));
+        }
         let balance_float = bytes_to_f64(&msg.balance).unwrap_or(f64::NAN);
         Ok(Self {
             token: msg.token.into(),
@@ -199,6 +206,11 @@ impl TryFromMessage for ChangeType {
             pb::ChangeType::Creation => Ok(ChangeType::Creation),
             pb::ChangeType::Update => Ok(ChangeType::Update),
             pb::ChangeType::Deletion => Ok(ChangeType::Deletion),
+            pb::ChangeType::Delta => Err(DecodeError::Decode(
+                "Unresolved CHANGE_TYPE_DELTA: deltas must be resolved into absolute values before \
+                 conversion"
+                    .to_owned(),
+            )),
             pb::ChangeType::Unspecified => Err(DecodeError::Decode(format!(
                 "Unknown ChangeType enum member encountered: {args:?}"
             ))),

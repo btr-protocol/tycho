@@ -58,7 +58,7 @@ pub fn map_events(
     Ok(Events { pool_events })
 }
 
-fn log_to_event(event: &Log, pool: Pool, tx: &TransactionTrace) -> Option<PoolEvent> {
+pub(crate) fn log_to_event(event: &Log, pool: Pool, tx: &TransactionTrace) -> Option<PoolEvent> {
     if let Some(init) = Initialize::match_and_decode(event) {
         Some(PoolEvent {
             log_ordinal: event.ordinal,
