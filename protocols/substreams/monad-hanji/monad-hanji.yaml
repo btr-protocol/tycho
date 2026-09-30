@@ -1,0 +1,44 @@
+specVersion: v0.1.0
+package:
+  name: "monad_hanji"
+  version: v0.1.0
+  url: "https://github.com/propeller-heads/tycho/tree/main/protocols/substreams/monad-hanji"
+
+protobuf:
+  files:
+    - tycho/evm/v1/vm.proto
+    - tycho/evm/v1/common.proto
+    - tycho/evm/v1/utils.proto
+  importPaths:
+    - ../../../proto
+
+binaries:
+  default:
+    type: wasm/rust-v1
+    file: ../target/wasm32-unknown-unknown/release/monad_hanji.wasm
+
+params:
+  # CLOB factory, fast-quoter proxy factory, market watchdog, alternate fast quoters.
+  store_markets: &hanji_params "clob_factory=0x5C28a12C8EbAF8524A2Ba1fdc62565571Aec87f1&proxy_factory=0x5c0051d2612045735be095fa0f7c012bbbf87587&watchdog=0xAd31cA82e571cFD5c3E360c658F3200F7c0129c4&alt_quoters=0x95b219bffe843470d0c4350097a2d1e8735a7569,0xe52297e1711d7ae6ab4da9123259b664130ff2cf"
+  map_protocol_changes: *hanji_params
+
+modules:
+  - name: store_markets
+    kind: store
+    # The CLOB factory's first market is created in the next block.
+    initialBlock: &initial_block 38411390
+    updatePolicy: set
+    valueType: string
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+
+  - name: map_protocol_changes
+    kind: map
+    initialBlock: *initial_block
+    inputs:
+      - params: string
+      - source: sf.ethereum.type.v2.Block
+      - store: store_markets
+    output:
+      type: proto:tycho.evm.v1.BlockChanges
