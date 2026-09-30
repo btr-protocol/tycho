@@ -6,7 +6,73 @@
 #![no_std]
 extern crate alloc;
 
-use alloc::{collections::BTreeMap, vec::Vec};
+use alloc::{collections::BTreeMap, vec, vec::Vec};
+
+/// Market storage slots (Kuru `AbstractAMM` + `OrderBook` layout, verified on chain 09-29).
+pub mod slot {
+    pub const VAULT_BEST_BID: u8 = 0;
+    pub const VAULT_BID_PARTIAL: u8 = 1; // high 96 bits; low 160 = vault address
+    pub const VAULT_BEST_ASK: u8 = 2;
+    pub const VAULT_ASK: u8 = 3; // low 96 ask partial, next 96 ask size
+    pub const VAULT_BID: u8 = 4; // low 96 bid size, next 96 spread
+    /// `mapping(uint256 price => PricePoint)` of bids and asks; a price point packs the head
+    /// order id (low 40 bits) and the tail (next 40).
+    pub const BUY_PRICE_POINTS: u8 = 51;
+    pub const SELL_PRICE_POINTS: u8 = 52;
+    pub const STATE: u8 = 61; // orderIdCounter u40 | marketState u8 | sizePrecision u96 | pricePrecision u32
+    pub const TAKER_FEE: u8 = 62;
+    pub const MAKER_FEE: u8 = 63;
+    pub const BASE_DECIMALS: u8 = 64;
+    pub const QUOTE_DECIMALS: u8 = 66;
+    /// Slots whose value the market's attributes mirror.
+    pub const ATTRIBUTES: [u8; 8] = [
+        VAULT_BEST_BID,
+        VAULT_BID_PARTIAL,
+        VAULT_BEST_ASK,
+        VAULT_ASK,
+        VAULT_BID,
+        STATE,
+        TAKER_FEE,
+        MAKER_FEE,
+    ];
+}
+
+/// `bits` bits of the big-endian `word` starting at bit `from`, as minimal big-endian bytes
+/// (`[0]` for zero).
+pub fn field(word: &[u8; 32], from: usize, bits: usize) -> Vec<u8> {
+    let mut out = [0u8; 32];
+    for bit in 0..bits.min(256 - from) {
+        let src = from + bit;
+        if word[31 - src / 8] >> (src % 8) & 1 == 1 {
+            out[31 - bit / 8] |= 1 << (bit % 8);
+        }
+    }
+    let first = out
+        .iter()
+        .position(|b| *b != 0)
+        .unwrap_or(31);
+    out[first..].to_vec()
+}
+
+/// The attributes a write of `word` to market storage `slot` sets, or none for a slot no
+/// attribute mirrors.
+pub fn slot_attributes(slot: u8, word: &[u8; 32]) -> Vec<(&'static str, Vec<u8>)> {
+    match slot {
+        slot::VAULT_BEST_BID => vec![("vault_best_bid", field(word, 0, 256))],
+        slot::VAULT_BID_PARTIAL => vec![("vault_bid_partial", field(word, 160, 96))],
+        slot::VAULT_BEST_ASK => vec![("vault_best_ask", field(word, 0, 256))],
+        slot::VAULT_ASK => {
+            vec![("vault_ask_partial", field(word, 0, 96)), ("vault_ask_size", field(word, 96, 96))]
+        }
+        slot::VAULT_BID => {
+            vec![("vault_bid_size", field(word, 0, 96)), ("vault_spread", field(word, 96, 96))]
+        }
+        slot::STATE => vec![("active", vec![u8::from(field(word, 40, 8) == [0])])],
+        slot::TAKER_FEE => vec![("taker_fee_bps", field(word, 0, 256))],
+        slot::MAKER_FEE => vec![("maker_fee_bps", field(word, 0, 256))],
+        _ => vec![],
+    }
+}
 
 /// Market events, already decoded (ABI decoding is per consumer).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,6 +120,29 @@ pub struct Delta {
 pub type OrderRef = (u32, bool, u128);
 
 const VPP: u128 = 1_000_000_000_000_000_000;
+
+/// Value of a resting order's `o/<id>` attribute: price (4 bytes), is_buy (1), size (12),
+/// big-endian.
+pub fn encode_order((price, is_buy, size): OrderRef) -> [u8; 17] {
+    let mut out = [0u8; 17];
+    out[..4].copy_from_slice(&price.to_be_bytes());
+    out[4] = u8::from(is_buy);
+    out[5..].copy_from_slice(&size.to_be_bytes()[4..]);
+    out
+}
+
+/// Inverse of [`encode_order`]; accepts the value with leading zero bytes stripped.
+pub fn decode_order(value: &[u8]) -> Result<OrderRef, &'static str> {
+    if value.len() > 17 {
+        return Err("order attribute longer than 17 bytes");
+    }
+    let mut full = [0u8; 17];
+    full[17 - value.len()..].copy_from_slice(value);
+    let mut size = [0u8; 16];
+    size[4..].copy_from_slice(&full[5..]);
+    let price = u32::from_be_bytes(full[..4].try_into().expect("4 bytes"));
+    Ok((price, full[4] == 1, u128::from_be_bytes(size)))
+}
 
 impl Event {
     /// The order whose size this event sets, and the size (0 = gone).
@@ -232,6 +321,35 @@ mod tests {
             ]),
             [3]
         );
+    }
+
+    #[test]
+    fn slot_fields_match_chain() {
+        // MON/USDC market slot 61 and slot 4, read 09-29
+        let hex = |s: &str| -> [u8; 32] {
+            let mut w = [0u8; 32];
+            for (i, b) in w.iter_mut().enumerate() {
+                *b = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap();
+            }
+            w
+        };
+        let w61 = hex("0000000000000000000005f5e1000000000000000002540be400000006c336fc");
+        assert_eq!(field(&w61, 40, 8), [0]); // state 0 = active
+        assert_eq!(field(&w61, 48, 96), 10_000_000_000u64.to_be_bytes()[3..]);
+        assert_eq!(slot_attributes(slot::STATE, &w61), [("active", alloc::vec![1])]);
+        let w4 = hex("000000000000000000000000000000000000001e000000000000000000000000");
+        assert_eq!(field(&w4, 96, 96), [30]);
+        assert_eq!(field(&w4, 0, 96), [0]);
+        assert_eq!(field(&w61, 0, 256)[..3], [0x05, 0xf5, 0xe1]);
+    }
+
+    #[test]
+    fn order_attribute_roundtrip() {
+        let order = (2_681_200, true, (1u128 << 95) + 7);
+        assert_eq!(decode_order(&encode_order(order)).unwrap(), order);
+        let small = (0, false, 5);
+        assert_eq!(decode_order(&encode_order(small)[16..]).unwrap(), small);
+        assert!(decode_order(&[0; 18]).is_err());
     }
 
     #[test]

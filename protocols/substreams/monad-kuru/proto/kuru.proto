@@ -34,4 +34,28 @@ message LevelDelta {
 
 message LevelDeltas {
   repeated LevelDelta deltas = 1;
+  // The order each event resizes, after the event, in event order.
+  repeated OrderUpdate orders = 2;
+}
+
+// A resting order as the order stores keep it.
+message OrderUpdate {
+  string market = 1;
+  uint64 ordinal = 2;
+  tycho.evm.v1.Transaction tx = 3;
+  uint64 id = 4;
+  uint32 price = 5;
+  bool is_buy = 6;
+  string size = 7;            // 0 = the order left the book
+}
+
+message SnapshotMarket {
+  string market = 1;
+  string params = 2;          // pp,sp,base_decimals,quote_decimals,base,quote
+}
+
+// State an indexer bootstrapped at block N passes to the stream at N+1 (map_snapshot_<i> params).
+message Snapshot {
+  repeated SnapshotMarket markets = 1;
+  repeated OrderUpdate orders = 2;  // resting orders; ordinal and tx unset
 }

@@ -9850,6 +9850,7 @@ dependencies = [
  "futures 0.3.31",
  "hex",
  "jemalloc_pprof",
+ "kuru-book",
  "metrics",
  "metrics-exporter-prometheus 0.16.2",
  "metrics-util 0.20.0",

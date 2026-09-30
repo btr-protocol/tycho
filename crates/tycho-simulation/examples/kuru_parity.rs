@@ -5,6 +5,7 @@
 //!   1. replayed levels == getL2Book() at B, exactly;
 //!   2. sim quote on that state == `placeAndExecuteMarket{Buy,Sell}` eth_call'd from address(0) at
 //!      B (the market's own quote path), to the wei, for random sizes on both sides.
+//!
 //! Vault params are read at B: the indexer takes them from storage diffs, not events.
 //!
 //!   cargo run -p tycho-simulation --example kuru_parity -- \

@@ -35,6 +35,7 @@ use crate::{
     },
 };
 
+pub mod kuru;
 pub mod logs;
 pub mod uniswap_v3;
 
@@ -125,6 +126,7 @@ fn default_verify_sample() -> usize {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SnapshotSourceConfig {
     UniswapV3(uniswap_v3::UniswapV3Config),
+    Kuru(kuru::KuruConfig),
 }
 
 impl BootstrapConfig {
@@ -161,6 +163,13 @@ impl BootstrapConfig {
                     self.concurrency,
                 )))
             }
+            SnapshotSourceConfig::Kuru(config) => Ok(Arc::new(kuru::KuruSource::new(
+                config.clone(),
+                rpc,
+                logs,
+                self.calls_per_request,
+                self.concurrency,
+            ))),
         }
     }
 }

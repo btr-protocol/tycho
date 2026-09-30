@@ -23,6 +23,7 @@ extractor/
     mod.rs                  SnapshotSource trait, config, block-N snapshot write, verification compare
     logs.rs                 LogSource trait: eth_getLogs and HyperSync implementations
     uniswap_v3.rs           Uniswap V3 / PancakeSwap V3 SnapshotSource (Multicall3 reads)
+    kuru.rs                 Kuru (Monad CLOB) SnapshotSource: getL2Book levels, resting orders by price-point walk, vault/fee storage
   chain_state.rs            ChainState — tracks current tip and finality horizon
   deltas.rs                 Resolves CHANGE_TYPE_DELTA attributes and balances into absolute values
   u256_num.rs               U256 numeric utilities

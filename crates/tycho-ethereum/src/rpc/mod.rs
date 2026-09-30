@@ -679,6 +679,29 @@ impl EthereumRpcClient {
             })
     }
 
+    /// Returns the storage word of `address` at `slot` as of `block`.
+    #[instrument(level = "debug", skip(self))]
+    pub async fn get_storage_at(
+        &self,
+        address: Address,
+        slot: B256,
+        block: BlockId,
+    ) -> Result<B256, RPCError> {
+        self.retry_policy
+            .call_with_retry(|| async {
+                self.inner
+                    .request("eth_getStorageAt", (address, U256::from_be_bytes(slot.0), block))
+                    .await
+            })
+            .await
+            .map_err(|e| {
+                RPCError::from_alloy(
+                    format!("Failed to get storage {slot} of {address} at block {block}"),
+                    e,
+                )
+            })
+    }
+
     /// Returns the logs matching `filter`. The caller keeps the filter's block range within the
     /// provider's `eth_getLogs` limit.
     #[instrument(level = "debug", skip(self))]

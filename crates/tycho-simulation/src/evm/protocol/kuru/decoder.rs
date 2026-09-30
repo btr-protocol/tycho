@@ -42,6 +42,8 @@ pub(super) fn apply_attribute(
         let book = match side {
             "b" => &mut s.bids,
             "a" => &mut s.asks,
+            // Resting orders (`o/<id>`), kept for restarting the indexer; the levels sum them.
+            "o" => return Ok(()),
             _ => return Err(format!("unknown attribute {key}")),
         };
         let price: u32 = price
@@ -162,6 +164,7 @@ mod tests {
             ("base_decimals".into(), be(18)),
             ("taker_fee_bps".into(), be(0)),
             ("a/2890000".into(), be(7)),
+            ("o/12".into(), be(7)),
         ]);
         let usdc = Token::new(&Bytes::from([1u8; 20]), "USDC", 6, 0, &[], Default::default(), 100);
         let tokens = HashMap::from([(usdc.address.clone(), usdc)]);

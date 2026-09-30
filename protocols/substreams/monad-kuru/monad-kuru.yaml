@@ -1,7 +1,7 @@
 specVersion: v0.1.0
 package:
   name: "monad_kuru"
-  version: v0.1.1
+  version: v0.2.0
 
 imports:
   ethereum_common: https://spkg.io/streamingfast/ethereum-common-v0.3.3.spkg
@@ -25,6 +25,93 @@ binaries:
 
 # 33615323: first Kuru Router MarketRegistered on Monad.
 modules:
+  - name: map_snapshot_0
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - params: string
+      - source: sf.substreams.v1.Clock
+    output:
+      type: proto:kuru.v1.Snapshot
+
+  - name: map_snapshot_1
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - params: string
+      - source: sf.substreams.v1.Clock
+    output:
+      type: proto:kuru.v1.Snapshot
+
+  - name: map_snapshot_2
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - params: string
+      - source: sf.substreams.v1.Clock
+    output:
+      type: proto:kuru.v1.Snapshot
+
+  - name: map_snapshot_3
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - params: string
+      - source: sf.substreams.v1.Clock
+    output:
+      type: proto:kuru.v1.Snapshot
+
+  - name: map_snapshot_4
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - params: string
+      - source: sf.substreams.v1.Clock
+    output:
+      type: proto:kuru.v1.Snapshot
+
+  - name: map_snapshot_5
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - params: string
+      - source: sf.substreams.v1.Clock
+    output:
+      type: proto:kuru.v1.Snapshot
+
+  - name: map_snapshot_6
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - params: string
+      - source: sf.substreams.v1.Clock
+    output:
+      type: proto:kuru.v1.Snapshot
+
+  - name: map_snapshot_7
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - params: string
+      - source: sf.substreams.v1.Clock
+    output:
+      type: proto:kuru.v1.Snapshot
+
+  - name: map_snapshot
+    kind: map
+    initialBlock: 33615323
+    inputs:
+      - map: map_snapshot_0
+      - map: map_snapshot_1
+      - map: map_snapshot_2
+      - map: map_snapshot_3
+      - map: map_snapshot_4
+      - map: map_snapshot_5
+      - map: map_snapshot_6
+      - map: map_snapshot_7
+    output:
+      type: proto:kuru.v1.Snapshot
+
   - name: map_markets
     kind: map
     initialBlock: 33615323
@@ -45,6 +132,7 @@ modules:
     updatePolicy: set
     valueType: string
     inputs:
+      - map: map_snapshot
       - map: map_markets
 
   - name: map_events
@@ -76,6 +164,7 @@ modules:
     updatePolicy: set
     valueType: bigint
     inputs:
+      - map: map_snapshot
       - map: map_events
 
   - name: store_order_meta
@@ -84,6 +173,7 @@ modules:
     updatePolicy: set_if_not_exists
     valueType: string
     inputs:
+      - map: map_snapshot
       - map: map_events
 
   - name: map_level_deltas
@@ -98,14 +188,6 @@ modules:
     output:
       type: proto:kuru.v1.LevelDeltas
 
-  - name: store_levels
-    kind: store
-    initialBlock: 33615323
-    updatePolicy: add
-    valueType: bigint
-    inputs:
-      - map: map_level_deltas
-
   - name: map_balance_deltas
     kind: map
     initialBlock: 33615323
@@ -115,14 +197,6 @@ modules:
     output:
       type: proto:tycho.evm.v1.BlockBalanceDeltas
 
-  - name: store_balances
-    kind: store
-    initialBlock: 33615323
-    updatePolicy: add
-    valueType: bigint
-    inputs:
-      - map: map_balance_deltas
-
   - name: map_protocol_changes
     kind: map
     initialBlock: 33615323
@@ -131,13 +205,17 @@ modules:
       - map: map_markets
       - store: store_markets
       - map: map_level_deltas
-      - store: store_levels
-        mode: deltas
       - map: map_balance_deltas
-      - store: store_balances
-        mode: deltas
     output:
       type: proto:tycho.evm.v1.BlockChanges
 
 params:
+  map_snapshot_0: ""
+  map_snapshot_1: ""
+  map_snapshot_2: ""
+  map_snapshot_3: ""
+  map_snapshot_4: ""
+  map_snapshot_5: ""
+  map_snapshot_6: ""
+  map_snapshot_7: ""
   map_markets: "d651346d7c789536ebf06dc72aE3C8502cd695CC"
