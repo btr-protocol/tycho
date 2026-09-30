@@ -6,11 +6,22 @@ use substreams::{
 };
 use tycho_substreams::models::BlockChanges;
 
-use crate::pb::pancakeswap::v3::Pool;
+use crate::pb::pancakeswap::v3::{Pool, SnapshotPools};
 
 #[substreams::handlers::store]
-pub fn store_pools(pools_created: BlockChanges, store: StoreSetIfNotExistsProto<Pool>) {
+pub fn store_pools(
+    snapshot: SnapshotPools,
+    pools_created: BlockChanges,
+    store: StoreSetIfNotExistsProto<Pool>,
+) {
     // Store pools. Required so the next maps can match any event to a known pool by their address
+    for pool in snapshot
+        .pools
+        .into_iter()
+        .filter_map(|p| p.pool)
+    {
+        store.set_if_not_exists(0, format!("Pool:0x{}", hex::encode(&pool.address)), &pool);
+    }
 
     for change in pools_created.changes {
         for component_change in &change.component_changes {

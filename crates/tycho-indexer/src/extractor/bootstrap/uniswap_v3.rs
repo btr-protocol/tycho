@@ -211,7 +211,8 @@ fn pool_address(component: &ProtocolComponent) -> Result<Address, ExtractionErro
 #[async_trait]
 impl SnapshotSource for UniswapV3Source {
     /// Passes every pool as `<pool>:<token0>:<token1>:<tick>` to the package's `map_snapshot`,
-    /// which seeds `store_pools` and `store_pool_current_tick`.
+    /// which seeds `store_pools` and `store_pool_current_tick`. The PancakeSwap package keys its
+    /// default protocol fees by fee tier, so its rows are `<pool>:<token0>:<token1>:<fee>:<tick>`.
     fn snapshot_rows(
         &self,
         block: u64,
@@ -245,8 +246,23 @@ impl SnapshotSource for UniswapV3Source {
                         component.id
                     )));
                 };
+                let fee = match self.config.protocol_fee_layout {
+                    ProtocolFeeLayout::Uniswap => String::new(),
+                    ProtocolFeeLayout::Pancakeswap => {
+                        let fee = component
+                            .static_attributes
+                            .get("fee")
+                            .ok_or_else(|| {
+                                ExtractionError::Setup(format!(
+                                    "Component {} has no fee",
+                                    component.id
+                                ))
+                            })?;
+                        format!("{}:", BigInt::from_signed_bytes_be(fee))
+                    }
+                };
                 Ok(format!(
-                    "{}:{}:{}:{tick}",
+                    "{}:{}:{}:{fee}{tick}",
                     component.id.trim_start_matches("0x"),
                     hex::encode(token0),
                     hex::encode(token1)
@@ -676,6 +692,23 @@ mod tests {
         function token0() external view returns (address);
         function token1() external view returns (address);
         function tickSpacing() external view returns (int24);
+        function fee() external view returns (uint24);
+    }
+
+    mod pancakeswap {
+        alloy::sol! {
+            event Swap(
+                address indexed sender,
+                address indexed recipient,
+                int256 amount0,
+                int256 amount1,
+                uint160 sqrtPriceX96,
+                uint128 liquidity,
+                int24 tick,
+                uint128 protocolFeesToken0,
+                uint128 protocolFeesToken1
+            );
+        }
     }
 
     fn env_or(name: &str, default: &str) -> String {
@@ -754,14 +787,15 @@ mod tests {
     }
 
     /// Records pool logs and snapshot reads from a live chain into the replay fixture of the
-    /// `ethereum-uniswap-v3-logs-only` package, whose `test_replay_matches_chain` replays them.
+    /// `ethereum-uniswap-v3-logs-only` package, or with `LAYOUT=pancakeswap` of the
+    /// `ethereum-pancakeswap-v3` package, whose `test_replay_matches_chain` replays them.
     ///
     /// Two cases: `bootstrap` starts from the snapshot of the most active pools at a finalized
     /// block and replays `SPAN` blocks of their logs; `replay` starts from a pool's creation and
     /// replays its whole history. The defaults target Uniswap V3 on Monad.
     #[tokio::test]
-    #[ignore = "Requires RPC_URL with historical eth_call; LOGS_RPC_URL, FACTORY, SPAN, POOLS, \
-                YOUNG_SPAN and LOGS_BLOCK_RANGE are optional"]
+    #[ignore = "Requires RPC_URL with historical eth_call; LOGS_RPC_URL, LAYOUT, FACTORY, SPAN, \
+                POOLS, YOUNG_SPAN and LOGS_BLOCK_RANGE are optional"]
     async fn test_generate_uniswap_v3_replay_fixture() {
         let rpc = EthereumRpcClient::new(&std::env::var("RPC_URL").expect("RPC_URL"))
             .unwrap()
@@ -772,7 +806,25 @@ mod tests {
                 .with_retry(tycho_ethereum::rpc::config::RPCRetryConfig::new(8, 500, 30_000)),
             Err(_) => rpc.clone(),
         };
-        let factory: Address = env_or("FACTORY", "0x204FAca1764B154221e35c0d20aBb3c525710498")
+        let (layout, package, protocol_type_name, swap, default_factory) =
+            match env_or("LAYOUT", "uniswap").as_str() {
+                "uniswap" => (
+                    ProtocolFeeLayout::Uniswap,
+                    "ethereum-uniswap-v3-logs-only",
+                    "uniswap_v3_pool",
+                    Swap::SIGNATURE_HASH,
+                    "0x204FAca1764B154221e35c0d20aBb3c525710498",
+                ),
+                "pancakeswap" => (
+                    ProtocolFeeLayout::Pancakeswap,
+                    "ethereum-pancakeswap-v3",
+                    "pancakeswap_v3_pool",
+                    pancakeswap::Swap::SIGNATURE_HASH,
+                    "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
+                ),
+                other => panic!("unknown LAYOUT {other}"),
+            };
+        let factory: Address = env_or("FACTORY", default_factory)
             .parse()
             .unwrap();
         let span: u64 = env_or("SPAN", "2000").parse().unwrap();
@@ -789,8 +841,8 @@ mod tests {
         let source = UniswapV3Source::new(
             UniswapV3Config {
                 factory,
-                protocol_type_name: "uniswap_v3_pool".to_string(),
-                protocol_fee_layout: ProtocolFeeLayout::Uniswap,
+                protocol_type_name: protocol_type_name.to_string(),
+                protocol_fee_layout: layout,
                 tick_lens: None,
             },
             rpc.clone(),
@@ -802,7 +854,7 @@ mod tests {
         // Bootstrap case: the factory's pools with the most swaps in the span.
         let swaps = logs_in_range(
             &logs_rpc,
-            Filter::new().event_signature(Swap::SIGNATURE_HASH),
+            Filter::new().event_signature(swap),
             start + 1,
             end,
             range,
@@ -842,6 +894,7 @@ mod tests {
             calls.push((*pool, token0Call {}.abi_encode().into()));
             calls.push((*pool, token1Call {}.abi_encode().into()));
             calls.push((*pool, tickSpacingCall {}.abi_encode().into()));
+            calls.push((*pool, feeCall {}.abi_encode().into()));
         }
         let mut info = rpc
             .multicall(&calls, BlockId::number(end), 200, 4)
@@ -854,13 +907,14 @@ mod tests {
                 let token0 = token0Call::abi_decode_returns(&info.next().unwrap()).unwrap();
                 let token1 = token1Call::abi_decode_returns(&info.next().unwrap()).unwrap();
                 let spacing = tickSpacingCall::abi_decode_returns(&info.next().unwrap()).unwrap();
+                let fee = feeCall::abi_decode_returns(&info.next().unwrap()).unwrap();
                 ProtocolComponent {
                     id: format!("0x{}", hex::encode(pool)),
                     tokens: vec![token0.to_vec().into(), token1.to_vec().into()],
-                    static_attributes: HashMap::from([(
-                        "tick_spacing".to_string(),
-                        signed(spacing.as_i32()),
-                    )]),
+                    static_attributes: HashMap::from([
+                        ("tick_spacing".to_string(), signed(spacing.as_i32())),
+                        ("fee".to_string(), signed(fee.to::<u32>())),
+                    ]),
                     ..Default::default()
                 }
             })
@@ -912,7 +966,7 @@ mod tests {
                 logs_in_range(&logs_rpc, Filter::new().address(pool), creation, end, range).await;
             if logs
                 .iter()
-                .any(|log| log.topics()[0] == Swap::SIGNATURE_HASH)
+                .any(|log| log.topics()[0] == swap)
             {
                 let model = ProtocolComponent {
                     id: component.id.clone(),
@@ -950,12 +1004,12 @@ mod tests {
         let replay_case = replay_case
             .unwrap_or_else(|| panic!("no pool created in the last {young_span} blocks swapped"));
         let cases = vec![bootstrap_case, replay_case];
-        let path = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../protocols/substreams/ethereum-uniswap-v3-logs-only/tests/fixtures/replay.json"
+        let path = format!(
+            "{}/../../protocols/substreams/{package}/tests/fixtures/replay.json",
+            env!("CARGO_MANIFEST_DIR")
         );
         std::fs::create_dir_all(
-            std::path::Path::new(path)
+            std::path::Path::new(&path)
                 .parent()
                 .unwrap(),
         )
@@ -990,6 +1044,9 @@ mod tests {
                     "address": c.id,
                     "token0": c.tokens[0].to_string(),
                     "token1": c.tokens[1].to_string(),
+                    "fee": c.static_attributes.get("fee").map_or(0, |fee| {
+                        u64::try_from(BigInt::from_signed_bytes_be(fee)).unwrap()
+                    }),
                 }))
                 .collect::<Vec<_>>(),
             "start": start

@@ -7,10 +7,7 @@ use crate::pb::pancakeswap::v3::{
     events::{pool_event, PoolEvent},
     Events,
 };
-use substreams::{
-    scalar::BigInt,
-    store::{StoreAddBigInt, StoreNew},
-};
+use substreams::scalar::BigInt;
 
 #[substreams::handlers::map]
 pub fn map_balance_changes(events: Events) -> Result<BlockBalanceDeltas, anyhow::Error> {
@@ -23,12 +20,7 @@ pub fn map_balance_changes(events: Events) -> Result<BlockBalanceDeltas, anyhow:
     Ok(BlockBalanceDeltas { balance_deltas })
 }
 
-#[substreams::handlers::store]
-pub fn store_pools_balances(balances_deltas: BlockBalanceDeltas, store: StoreAddBigInt) {
-    tycho_substreams::balances::store_balance_changes(balances_deltas, store);
-}
-
-fn event_to_balance_deltas(event: PoolEvent) -> Vec<BalanceDelta> {
+pub(crate) fn event_to_balance_deltas(event: PoolEvent) -> Vec<BalanceDelta> {
     let address = format!("0x{}", event.pool_address)
         .as_bytes()
         .to_vec();

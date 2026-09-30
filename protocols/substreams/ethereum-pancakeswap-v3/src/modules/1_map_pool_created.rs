@@ -107,11 +107,13 @@ fn get_new_pools(
                         .to_hex()
                         .as_bytes()
                         .to_vec(),
+                    ..Default::default()
                 },
                 BalanceChange {
                     token: event.token1,
                     balance: BigInt::from(0).to_signed_bytes_be(),
                     component_id: event.pool.to_hex().as_bytes().to_vec(),
+                    ..Default::default()
                 },
             ],
             contract_changes: vec![],
