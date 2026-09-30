@@ -9,6 +9,9 @@
 - A mint or burn is in range only when the pool's current tick says so. The v0.2.0 fallback that
   guessed from the token amounts is removed, because the snapshot always provides the tick.
 
+- Add the Monad Uniswap V3 manifest (factory `0x204FAca1764B154221e35c0d20aBb3c525710498`, first
+  `PoolCreated` at block 32036467).
+
 ## v0.2.0
 
 - Emit tick net liquidity, pool balances, and the liquidity changes of mints and burns as
