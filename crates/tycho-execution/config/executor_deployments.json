@@ -297,6 +297,7 @@
       "contract": "NativeWrapExecutor",
       "args": ["0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A"]
     },
-    "kuru": { "contract": "KuruExecutor", "args": [] }
+    "kuru": { "contract": "KuruExecutor", "args": [] },
+    "vm:hanji": { "contract": "HanjiExecutor", "args": [] }
   }
 }

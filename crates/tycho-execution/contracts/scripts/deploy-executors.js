@@ -106,6 +106,7 @@ const deploy_protocols = {
         "vm:curve",
         "native_wrapper",
         "kuru",
+        "vm:hanji",
     ],
 };
 

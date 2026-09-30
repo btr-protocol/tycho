@@ -207,8 +207,8 @@ impl SwapEncoderRegistry {
             "erc4626" => {
                 Ok(Box::new(ERC4626SwapEncoder::new(executor_address, self.chain, config)?))
             }
-            // Kuru's executor takes the same packed (market, tokenIn, tokenOut) data.
-            "lunarbase" | "kuru" => {
+            // Kuru and Hanji executors take the same packed (market, tokenIn, tokenOut) data.
+            "lunarbase" | "kuru" | "vm:hanji" => {
                 Ok(Box::new(LunarBaseSwapEncoder::new(executor_address, self.chain, config)?))
             }
             "native_wrapper" => {
@@ -367,6 +367,58 @@ mod tests {
             .get_encoder("kuru")
             .expect("no encoder resolved for kuru");
         assert_eq!(encoder.executor_address(), &executor_address);
+    }
+
+    /// Hanji swaps encode as packed `proxy | tokenIn | tokenOut`; `Hanji.t.sol` decodes this.
+    #[test]
+    fn test_encode_hanji_mon_usdc() {
+        use num_bigint::BigUint;
+        use tycho_common::models::protocol::ProtocolComponent;
+
+        use crate::encoding::{
+            evm::utils::write_calldata_to_file,
+            models::{default_token, EncodingContext, Swap},
+        };
+
+        let wmon = Bytes::from("0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A");
+        let usdc = Bytes::from("0x754704Bc059F8C67012fEd69BC8A327a5aafb603");
+        let swap = Swap::new(
+            ProtocolComponent {
+                id: String::from("0x1aed222dda944a87703c918745b11be13f8eef10"),
+                protocol_system: String::from("vm:hanji"),
+                ..Default::default()
+            },
+            default_token(wmon.clone()),
+            default_token(usdc.clone()),
+            BigUint::ZERO,
+        );
+        let context = EncodingContext {
+            router_address: Some(Bytes::zero(20)),
+            group_token_in: wmon,
+            group_token_out: usdc,
+        };
+        let registry = SwapEncoderRegistry::new(Chain::Monad)
+            .add_default_encoders(Some(
+                r#"{"monad":{"vm:hanji":"0x1111111111111111111111111111111111111111"}}"#.into(),
+            ))
+            .unwrap();
+
+        let encoded = registry
+            .get_encoder("vm:hanji")
+            .expect("no encoder resolved for vm:hanji")
+            .encode_swap(&swap, &context)
+            .unwrap();
+        let hex_swap = alloy::hex::encode(&encoded);
+
+        assert_eq!(
+            hex_swap,
+            concat!(
+                "1aed222dda944a87703c918745b11be13f8eef10",
+                "3bd359c1119da7da1d913d1c4d2b7c461115433a",
+                "754704bc059f8c67012fed69bc8a327a5aafb603",
+            )
+        );
+        write_calldata_to_file("test_encode_hanji_mon_usdc", hex_swap.as_str());
     }
 
     #[test]
