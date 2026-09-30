@@ -1,6 +1,5 @@
 use std::str::FromStr;
 
-use anyhow::Ok;
 use tycho_substreams::models::{BalanceDelta, BlockBalanceDeltas};
 
 use crate::{
@@ -10,44 +9,53 @@ use crate::{
         Events,
     },
 };
-use substreams::{
-    prelude::StoreGet,
-    scalar::BigInt,
-    store::{StoreAddBigInt, StoreGetBigInt, StoreNew},
-};
+use substreams::{prelude::StoreGet, scalar::BigInt, store::StoreGetBigInt};
 
 #[substreams::handlers::map]
 pub fn map_balance_changes(
     events: Events,
     pools_current_sqrt_price_store: StoreGetBigInt,
 ) -> Result<BlockBalanceDeltas, anyhow::Error> {
-    let balance_deltas = events
+    balance_changes(events, |event| {
+        pools_current_sqrt_price_store.get_at(event.log_ordinal, format!("pool:{0}", event.pool_id))
+    })
+}
+
+/// Returns the balance deltas of `events`. `current_sqrt_price` gives a pool's price before an
+/// event.
+///
+/// Errors on a liquidity change of a pool whose price is unknown. A pool's `Initialize` precedes
+/// its first liquidity change, and a snapshot seeds the price of every older pool, so this means
+/// the stream started after the pool's creation without a snapshot.
+pub fn balance_changes(
+    events: Events,
+    current_sqrt_price: impl Fn(&PoolEvent) -> Option<BigInt>,
+) -> Result<BlockBalanceDeltas, anyhow::Error> {
+    let mut balance_deltas = Vec::new();
+    for event in events
         .pool_events
         .into_iter()
         .filter(PoolEvent::can_introduce_balance_changes)
-        .map(|e| {
-            (
-                pools_current_sqrt_price_store
-                    .get_at(e.log_ordinal, format!("pool:{0}", e.pool_id))
-                    .unwrap_or(BigInt::zero()),
-                e,
-            )
-        })
-        .filter_map(|(current_sqrt_price, event)| {
-            event_to_balance_deltas(current_sqrt_price, event)
-        })
-        .flatten()
-        .collect();
-
+    {
+        let price = match (current_sqrt_price(&event), event.r#type.as_ref()) {
+            (Some(price), _) => price,
+            (None, Some(pool_event::Type::ModifyLiquidity(_))) => anyhow::bail!(
+                "pool {} changed its liquidity before its price was known",
+                event.pool_id
+            ),
+            // A swap's amounts do not depend on the price.
+            (None, _) => BigInt::zero(),
+        };
+        balance_deltas.extend(
+            event_to_balance_deltas(price, event)
+                .into_iter()
+                .flatten(),
+        );
+    }
     Ok(BlockBalanceDeltas { balance_deltas })
 }
 
-#[substreams::handlers::store]
-pub fn store_pools_balances(balances_deltas: BlockBalanceDeltas, store: StoreAddBigInt) {
-    tycho_substreams::balances::store_balance_changes(balances_deltas, store);
-}
-
-fn event_to_balance_deltas(
+pub fn event_to_balance_deltas(
     current_sqrt_price: BigInt,
     event: PoolEvent,
 ) -> Option<Vec<BalanceDelta>> {

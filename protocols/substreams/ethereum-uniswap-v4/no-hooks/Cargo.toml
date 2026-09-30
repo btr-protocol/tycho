@@ -1,6 +1,6 @@
 [package]
 name = "ethereum-uniswap-v4-no-hooks"
-version = "0.4.3"
+version = "0.5.0"
 edition = "2021"
 
 [lib]
@@ -11,8 +11,8 @@ crate-type = ["cdylib"]
 substreams = "0.5.22"
 substreams-ethereum = "0.9.9"
 ethabi = "18.0.0"
-substreams-helper = { git = "https://github.com/propeller-heads/tycho-protocol-sdk.git", tag = "0.5.0" }
-tycho-substreams =  "0.6.0"
+substreams-helper = { path = "../../crates/substreams-helper" }
+tycho-substreams = { path = "../../crates/tycho-substreams" }
 hex = "0.4.3"
 
 # Shared library dependency

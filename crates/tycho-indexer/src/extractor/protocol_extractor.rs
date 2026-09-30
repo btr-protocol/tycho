@@ -520,7 +520,7 @@ where
         let block_id = BlockId::hash(B256::from_slice(&block.hash));
         let expected = match check
             .source
-            .state(&components, block_id)
+            .expected_state(&components, block_id)
             .await
         {
             Ok(expected) => expected,

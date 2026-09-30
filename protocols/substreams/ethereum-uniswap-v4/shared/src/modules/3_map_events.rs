@@ -31,7 +31,7 @@ pub fn map_events(
             receipt
                 .logs
                 .iter()
-                .filter_map(|log| log_to_event(log, &tx, &pools_store))
+                .filter_map(|log| log_to_event(log, &tx, |key| pools_store.get_last(key)))
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
@@ -41,16 +41,17 @@ pub fn map_events(
     Ok(Events { pool_events: pool_manager_events })
 }
 
-fn log_to_event(
+/// Decodes a PoolManager log of a known pool. `pool` looks a pool up by its store key.
+pub fn log_to_event(
     event: &Log,
     tx: &TransactionTrace,
-    pools_store: &StoreGetProto<Pool>,
+    pool: impl Fn(String) -> Option<Pool>,
 ) -> Option<PoolEvent> {
     if let Some(init) = Initialize::match_and_decode(event) {
         // We need to track initialization again to keep track of pool current tick, which is set on
         // initialization and changed on swaps.
         let pool_id = init.id.to_vec().to_hex();
-        let pool = pools_store.get_last(format!("{}:{}", "pool", pool_id))?;
+        let pool = pool(format!("{}:{}", "pool", pool_id))?;
         Some(PoolEvent {
             log_ordinal: event.ordinal,
             pool_id,
@@ -67,7 +68,7 @@ fn log_to_event(
         })
     } else if let Some(swap) = Swap::match_and_decode(event) {
         let pool_id = swap.id.to_vec().to_hex();
-        let pool = pools_store.get_last(format!("{}:{}", "pool", pool_id))?;
+        let pool = pool(format!("{}:{}", "pool", pool_id))?;
         Some(PoolEvent {
             log_ordinal: event.ordinal,
             pool_id,
@@ -87,7 +88,7 @@ fn log_to_event(
     // Skipped because Donate doesn't seem to affect pool liquidity?
     // } else if let Some(flash) = Donate::match_and_decode(event) {
     //     let pool_id = flash.id.to_vec().to_hex();
-    //     let pool = pools_store.get_last(format!("{}:{}", "pool", &pool_id))?;
+    //     let pool = pool(format!("{}:{}", "pool", &pool_id))?;
     //     Some(PoolEvent {
     //         log_ordinal: event.ordinal,
     //         pool_id,
@@ -102,7 +103,7 @@ fn log_to_event(
     //     })
     } else if let Some(modify_liquidity) = ModifyLiquidity::match_and_decode(event) {
         let pool_id = modify_liquidity.id.to_vec().to_hex();
-        let pool = pools_store.get_last(format!("{}:{}", "pool", pool_id))?;
+        let pool = pool(format!("{}:{}", "pool", pool_id))?;
         Some(PoolEvent {
             log_ordinal: event.ordinal,
             pool_id,
@@ -124,7 +125,7 @@ fn log_to_event(
             .id
             .to_vec()
             .to_hex();
-        let pool = pools_store.get_last(format!("{}:{}", "pool", pool_id))?;
+        let pool = pool(format!("{}:{}", "pool", pool_id))?;
         Some(PoolEvent {
             log_ordinal: event.ordinal,
             pool_id: pool_id.clone(),

@@ -1,22 +1,15 @@
 //! Snapshot source for Uniswap V3 and its forks, matching the output of the
 //! `ethereum-uniswap-v3-logs-only` package.
 
-use std::{
-    collections::HashMap,
-    sync::atomic::{AtomicBool, Ordering},
-};
+use std::collections::HashMap;
 
 use alloy::{
-    primitives::{aliases::I24, Address, Bytes as AlloyBytes, I256, U256},
-    rpc::types::{
-        state::{AccountOverride, StateOverride},
-        BlockId, TransactionInput, TransactionRequest,
-    },
+    primitives::{Address, I256, U256},
+    rpc::types::BlockId,
     sol,
     sol_types::{SolCall, SolEvent},
 };
 use async_trait::async_trait;
-use futures03::{stream, StreamExt};
 use num_bigint::BigInt;
 use serde::Deserialize;
 use tycho_common::{
@@ -27,7 +20,11 @@ use tycho_ethereum::{erc20::balanceOfCall, rpc::EthereumRpcClient};
 use tycho_protobuf::pb::tycho::evm::v1 as pb;
 
 use crate::extractor::{
-    bootstrap::{logs::LogSource, SnapshotSource},
+    bootstrap::{
+        logs::LogSource,
+        ticks::{decode_error, TickReader, TickSource},
+        SnapshotSource,
+    },
     ExtractionError,
 };
 
@@ -41,37 +38,9 @@ sol! {
     );
 
     function liquidity() external view returns (uint128);
-    function tickBitmap(int16 wordPosition) external view returns (uint256);
-    function ticks(int24 tick) external view returns (
-        uint128 liquidityGross,
-        int128 liquidityNet,
-        uint256 feeGrowthOutside0X128,
-        uint256 feeGrowthOutside1X128,
-        int56 tickCumulativeOutside,
-        uint160 secondsPerLiquidityOutsideX128,
-        uint32 secondsOutside,
-        bool initialized
-    );
     function slot0() external view;
 
-    function scan(address pool, int24 tickSpacing, int16 fromWord, int16 toWord)
-        external
-        view
-        returns (int24[] memory ticks, int128[] memory liquidityNet);
-
-    struct PopulatedTick {
-        int24 tick;
-        int128 liquidityNet;
-        uint128 liquidityGross;
-    }
-    function getPopulatedTicksInWord(address pool, int16 tickBitmapIndex)
-        external
-        view
-        returns (PopulatedTick[] memory populatedTicks);
 }
-
-const MIN_TICK: i32 = -887272;
-const MAX_TICK: i32 = 887272;
 
 /// How a fork packs and names its protocol fee.
 #[derive(Debug, Deserialize, Clone, Copy, Default, PartialEq)]
@@ -103,11 +72,8 @@ pub struct UniswapV3Config {
 /// initialized tick, and the pool's token balances.
 pub struct UniswapV3Source {
     config: UniswapV3Config,
-    scanner_unsupported: AtomicBool,
-    rpc: EthereumRpcClient,
+    ticks: TickReader,
     logs: Box<dyn LogSource>,
-    calls_per_request: usize,
-    concurrency: usize,
 }
 
 impl UniswapV3Source {
@@ -118,38 +84,17 @@ impl UniswapV3Source {
         calls_per_request: usize,
         concurrency: usize,
     ) -> Self {
-        Self {
-            config,
-            scanner_unsupported: Default::default(),
-            rpc,
-            logs,
-            calls_per_request,
-            concurrency,
-        }
-    }
-
-    async fn multicall(
-        &self,
-        calls: Vec<(Address, AlloyBytes)>,
-        block: BlockId,
-    ) -> Result<Vec<AlloyBytes>, ExtractionError> {
-        self.rpc
-            .multicall(&calls, block, self.calls_per_request, self.concurrency)
-            .await
-            .map_err(|e| ExtractionError::Setup(format!("Snapshot read at block {block}: {e}")))
+        let ticks = TickReader::new(rpc, calls_per_request, concurrency, config.tick_lens);
+        Self { config, ticks, logs }
     }
 }
 
-fn signed(value: impl Into<BigInt>) -> Bytes {
+pub(crate) fn signed(value: impl Into<BigInt>) -> Bytes {
     value.into().to_signed_bytes_be().into()
 }
 
-fn uint(value: U256) -> BigInt {
+pub(crate) fn uint(value: U256) -> BigInt {
     BigInt::from_bytes_be(num_bigint::Sign::Plus, &value.to_be_bytes::<32>())
-}
-
-fn decode_error(what: &str, pool: Address, e: impl std::fmt::Display) -> ExtractionError {
-    ExtractionError::Setup(format!("Failed to decode {what} of pool {pool}: {e}"))
 }
 
 /// A pool's `slot0` fields that the packages index. Decoded by word so that the Uniswap
@@ -177,21 +122,7 @@ impl Slot0 {
     }
 }
 
-/// The `tickBitmap` word positions a pool with `tick_spacing` can use.
-fn word_range(tick_spacing: i32) -> std::ops::RangeInclusive<i16> {
-    let word = |tick: i32| (tick.div_euclid(tick_spacing) >> 8) as i16;
-    word(MIN_TICK)..=word(MAX_TICK)
-}
-
-/// The initialized ticks a `tickBitmap` word marks.
-fn ticks_in_word(word_position: i16, bitmap: U256, tick_spacing: i32) -> Vec<i32> {
-    (0..256)
-        .filter(|bit| bitmap.bit(*bit))
-        .map(|bit| ((i32::from(word_position) << 8) + bit as i32) * tick_spacing)
-        .collect()
-}
-
-fn tick_spacing(component: &ProtocolComponent) -> Result<i32, ExtractionError> {
+pub(crate) fn tick_spacing(component: &ProtocolComponent) -> Result<i32, ExtractionError> {
     component
         .static_attributes
         .get("tick_spacing")
@@ -324,14 +255,16 @@ impl SnapshotSource for UniswapV3Source {
             }
         }
         let mut results = self
+            .ticks
             .multicall(calls, block)
             .await?
             .into_iter();
         let ticks = self
+            .ticks
             .initialized_ticks(
                 &pools
                     .iter()
-                    .map(|(pool, spacing, _)| (*pool, *spacing))
+                    .map(|(pool, spacing, _)| (TickSource::V3(*pool), *spacing))
                     .collect::<Vec<_>>(),
                 block,
             )
@@ -371,245 +304,7 @@ impl SnapshotSource for UniswapV3Source {
     }
 }
 
-/// Throwaway address the tick scanner's code is injected at.
-const SCANNER_ADDRESS: Address =
-    alloy::primitives::address!("00000000000000000000000000000000005ca115");
-
-/// Runtime bytecode of `lens/TickScanner.sol`, built with `lens/foundry.toml`.
-const SCANNER_CODE: &str = include_str!("lens/TickScanner.bin");
-
-/// Bitmap words a single scanner call covers at first; a call that fails is split.
-const SCANNER_WORDS_PER_CALL: i32 = 1024;
-
 impl UniswapV3Source {
-    /// Returns each pool's initialized ticks with their net liquidity, in ascending order.
-    ///
-    /// Runs the tick scanner through `eth_call` state overrides: one call per 1024 bitmap words.
-    /// When the RPC rejects state overrides, falls back to reading every bitmap word through
-    /// Multicall3, then each initialized tick through the configured `TickLens`, or through
-    /// `ticks(i)` without one.
-    async fn initialized_ticks(
-        &self,
-        pools: &[(Address, i32)],
-        block: BlockId,
-    ) -> Result<Vec<Vec<(i32, i128)>>, ExtractionError> {
-        if !self
-            .scanner_unsupported
-            .load(Ordering::Relaxed)
-        {
-            if self.scanner_supported(block).await {
-                return self.scan_ticks(pools, block).await;
-            }
-            tracing::warn!("RPC does not run state overrides; reading ticks by bitmap word");
-            self.scanner_unsupported
-                .store(true, Ordering::Relaxed);
-        }
-        self.read_ticks(pools, block).await
-    }
-
-    fn scanner_overrides() -> Result<StateOverride, ExtractionError> {
-        let code = hex::decode(SCANNER_CODE.trim())
-            .map_err(|e| ExtractionError::Setup(format!("Invalid scanner code: {e}")))?;
-        Ok([(SCANNER_ADDRESS, AccountOverride { code: Some(code.into()), ..Default::default() })]
-            .into_iter()
-            .collect())
-    }
-
-    async fn scan(
-        &self,
-        pool: Address,
-        spacing: i32,
-        from: i16,
-        to: i16,
-        block: BlockId,
-    ) -> Result<scanReturn, ExtractionError> {
-        let data = scanCall {
-            pool,
-            tickSpacing: I24::try_from(spacing)
-                .map_err(|e| decode_error("tick spacing", pool, e))?,
-            fromWord: from,
-            toWord: to,
-        }
-        .abi_encode();
-        let tx = TransactionRequest::default()
-            .to(SCANNER_ADDRESS)
-            .input(TransactionInput::both(data.into()));
-        let output = self
-            .rpc
-            .eth_call_with_state_overrides(tx, block, Self::scanner_overrides()?)
-            .await
-            .map_err(|e| {
-                ExtractionError::Setup(format!("Tick scan of pool {pool} words {from}..={to}: {e}"))
-            })?;
-        scanCall::abi_decode_returns(&output).map_err(|e| decode_error("tick scan", pool, e))
-    }
-
-    /// Whether the RPC runs the injected scanner: an empty scan must return two empty arrays. An
-    /// RPC that ignores the override returns no data, and one that rejects it returns an error.
-    async fn scanner_supported(&self, block: BlockId) -> bool {
-        match self
-            .scan(Address::ZERO, 1, 0, -1, block)
-            .await
-        {
-            Ok(empty) => empty.ticks.is_empty(),
-            Err(err) => {
-                tracing::debug!(%err, "Tick scanner probe failed");
-                false
-            }
-        }
-    }
-
-    /// Scans each pool's bitmap words in chunks of `SCANNER_WORDS_PER_CALL`. A chunk that fails,
-    /// for example by exceeding the RPC's gas cap on a dense pool, is split in half and retried;
-    /// a single word that still fails is an error.
-    async fn scan_ticks(
-        &self,
-        pools: &[(Address, i32)],
-        block: BlockId,
-    ) -> Result<Vec<Vec<(i32, i128)>>, ExtractionError> {
-        let mut ranges = Vec::new();
-        for (index, (_, spacing)) in pools.iter().enumerate() {
-            let words = word_range(*spacing);
-            let (first, last) = (i32::from(*words.start()), i32::from(*words.end()));
-            for from in (first..=last).step_by(SCANNER_WORDS_PER_CALL as usize) {
-                ranges.push((index, from, last.min(from + SCANNER_WORDS_PER_CALL - 1)));
-            }
-        }
-        let mut ticks: Vec<Vec<(i32, i32, i128)>> = vec![Vec::new(); pools.len()];
-        while !ranges.is_empty() {
-            let results: Vec<_> = stream::iter(std::mem::take(&mut ranges))
-                .map(|(index, from, to)| async move {
-                    let (pool, spacing) = pools[index];
-                    (
-                        index,
-                        from,
-                        to,
-                        self.scan(pool, spacing, from as i16, to as i16, block)
-                            .await,
-                    )
-                })
-                .buffer_unordered(self.concurrency)
-                .collect()
-                .await;
-            for (index, from, to, result) in results {
-                match result {
-                    Ok(scanned) => ticks[index].extend(
-                        scanned
-                            .ticks
-                            .into_iter()
-                            .map(|tick| (from, tick.as_i32()))
-                            .zip(scanned.liquidityNet)
-                            .map(|((from, tick), net)| (from, tick, net)),
-                    ),
-                    Err(err) if from == to => return Err(err),
-                    Err(err) => {
-                        tracing::debug!(%err, "Splitting tick scan range");
-                        let mid = from + (to - from) / 2;
-                        ranges.extend([(index, from, mid), (index, mid + 1, to)]);
-                    }
-                }
-            }
-        }
-        Ok(ticks
-            .into_iter()
-            .map(|mut pool_ticks| {
-                pool_ticks.sort_by_key(|(_, tick, _)| *tick);
-                pool_ticks
-                    .into_iter()
-                    .map(|(_, tick, net)| (tick, net))
-                    .collect()
-            })
-            .collect())
-    }
-
-    /// Reads every bitmap word, then the net liquidity of each initialized tick.
-    async fn read_ticks(
-        &self,
-        pools: &[(Address, i32)],
-        block: BlockId,
-    ) -> Result<Vec<Vec<(i32, i128)>>, ExtractionError> {
-        let mut calls = Vec::new();
-        for (pool, spacing) in pools {
-            for word in word_range(*spacing) {
-                calls.push((
-                    *pool,
-                    tickBitmapCall { wordPosition: word }
-                        .abi_encode()
-                        .into(),
-                ));
-            }
-        }
-        let mut bitmaps = self
-            .multicall(calls, block)
-            .await?
-            .into_iter();
-        let mut words = Vec::new();
-        for (index, (pool, spacing)) in pools.iter().enumerate() {
-            for word in word_range(*spacing) {
-                let data = bitmaps
-                    .next()
-                    .ok_or_else(|| decode_error("multicall", *pool, "missing result"))?;
-                let bitmap = tickBitmapCall::abi_decode_returns(&data)
-                    .map_err(|e| decode_error("tickBitmap", *pool, e))?;
-                if !bitmap.is_zero() {
-                    words.push((index, word, bitmap));
-                }
-            }
-        }
-
-        let mut ticks = vec![Vec::new(); pools.len()];
-        if let Some(lens) = self.config.tick_lens {
-            let calls = words
-                .iter()
-                .map(|(index, word, _)| {
-                    let call = getPopulatedTicksInWordCall {
-                        pool: pools[*index].0,
-                        tickBitmapIndex: *word,
-                    };
-                    (lens, call.abi_encode().into())
-                })
-                .collect();
-            let results = self.multicall(calls, block).await?;
-            for ((index, _, _), data) in words.iter().zip(results) {
-                let mut populated = getPopulatedTicksInWordCall::abi_decode_returns(&data)
-                    .map_err(|e| decode_error("getPopulatedTicksInWord", pools[*index].0, e))?;
-                populated.sort_by_key(|t| t.tick);
-                ticks[*index].extend(
-                    populated
-                        .into_iter()
-                        .map(|t| (t.tick.as_i32(), t.liquidityNet)),
-                );
-            }
-            return Ok(ticks);
-        }
-
-        let mut owners = Vec::new();
-        let mut calls = Vec::new();
-        for (index, word, bitmap) in words {
-            let (pool, spacing) = pools[index];
-            for tick in ticks_in_word(word, bitmap, spacing) {
-                let tick_arg =
-                    I24::try_from(tick).map_err(|e| decode_error("tickBitmap", pool, e))?;
-                calls.push((
-                    pool,
-                    ticksCall { tick: tick_arg }
-                        .abi_encode()
-                        .into(),
-                ));
-                owners.push((index, tick));
-            }
-        }
-        for ((index, tick), data) in owners
-            .into_iter()
-            .zip(self.multicall(calls, block).await?)
-        {
-            let info = ticksCall::abi_decode_returns(&data)
-                .map_err(|e| decode_error("ticks", pools[index].0, e))?;
-            ticks[index].push((tick, info.liquidityNet));
-        }
-        Ok(ticks)
-    }
-
     fn protocol_fees(&self, fee_protocol: u32) -> Vec<(String, Bytes)> {
         match self.config.protocol_fee_layout {
             ProtocolFeeLayout::Uniswap if fee_protocol == 0 => vec![],
@@ -626,24 +321,14 @@ impl UniswapV3Source {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use alloy::rpc::types::{Filter, Log};
 
     use super::*;
-    use crate::extractor::bootstrap::logs::RpcLogSource;
-
-    #[test]
-    fn test_word_range_covers_tick_bounds() {
-        assert_eq!(word_range(60), -58..=57);
-        assert_eq!(word_range(1), -3466..=3465);
-    }
-
-    #[test]
-    fn test_ticks_in_word() {
-        let bitmap = (U256::from(1) << 0) | (U256::from(1) << 255);
-        assert_eq!(ticks_in_word(-1, bitmap, 10), vec![-2560, -10]);
-        assert_eq!(ticks_in_word(0, bitmap, 10), vec![0, 2550]);
-    }
+    use crate::extractor::bootstrap::{
+        logs::RpcLogSource,
+        ticks::{word_range, SCANNER_WORDS_PER_CALL},
+    };
 
     #[test]
     fn test_slot0_decodes_both_fee_layouts() {
@@ -678,11 +363,11 @@ mod tests {
         function tickSpacing() external view returns (int24);
     }
 
-    fn env_or(name: &str, default: &str) -> String {
+    pub(crate) fn env_or(name: &str, default: &str) -> String {
         std::env::var(name).unwrap_or_else(|_| default.to_string())
     }
 
-    fn hex_state(state: &ProtocolComponentState) -> serde_json::Value {
+    pub(crate) fn hex_state(state: &ProtocolComponentState) -> serde_json::Value {
         let map = |m: &HashMap<Bytes, Bytes>| -> serde_json::Map<String, serde_json::Value> {
             m.iter()
                 .map(|(k, v)| (k.to_string(), v.to_string().into()))
@@ -698,7 +383,7 @@ mod tests {
         })
     }
 
-    async fn logs_in_range(
+    pub(crate) async fn logs_in_range(
         rpc: &EthereumRpcClient,
         filter: Filter,
         from: u64,
@@ -724,7 +409,7 @@ mod tests {
         logs
     }
 
-    fn log_json(log: &Log) -> serde_json::Value {
+    pub(crate) fn log_json(log: &Log) -> serde_json::Value {
         serde_json::json!({
             "block_number": log.block_number.unwrap(),
             "transaction_hash": log.transaction_hash.unwrap().to_string(),
@@ -738,7 +423,7 @@ mod tests {
 
     /// Checks that a pool's net liquidity sums to zero over its ticks, as every position adds
     /// its liquidity at the lower tick and removes it at the upper one.
-    fn assert_ticks_balance(state: &ProtocolComponentState) {
+    pub(crate) fn assert_ticks_balance(state: &ProtocolComponentState) {
         let sum: BigInt = state
             .attributes
             .iter()
@@ -1044,34 +729,6 @@ mod tests {
             .is_err());
     }
 
-    #[test]
-    #[ignore = "Requires forge"]
-    fn test_scanner_bytecode_matches_source() {
-        let root = concat!(env!("CARGO_MANIFEST_DIR"), "/src/extractor/bootstrap/lens");
-        let out = std::env::temp_dir().join("tycho-tick-scanner");
-        let status = std::process::Command::new("forge")
-            .args(["build", "--root", root, "--out"])
-            .arg(&out)
-            .status()
-            .expect("forge");
-        assert!(status.success());
-        let artifact: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(out.join("TickScanner.sol/TickScanner.json")).unwrap(),
-        )
-        .unwrap();
-        let built = artifact["deployedBytecode"]["object"]
-            .as_str()
-            .unwrap()
-            .trim_start_matches("0x");
-        assert_eq!(built, SCANNER_CODE.trim(), "rebuild lens/TickScanner.bin from its source");
-        let status = std::process::Command::new("forge")
-            .args(["test", "--root", root, "--out"])
-            .arg(&out)
-            .status()
-            .expect("forge");
-        assert!(status.success(), "lens/test/TickScanner.t.sol failed");
-    }
-
     /// Reads the ticks of the replay fixture's pools, plus the tick-spacing-1 pool in `POOL_TS1`,
     /// with the scanner and with per-tick reads, requires both to match, and prints the calls and
     /// time each path takes.
@@ -1141,7 +798,8 @@ mod tests {
             let words = word_range(*spacing).count();
             let started = std::time::Instant::now();
             let Ok(scanned) = source
-                .scan_ticks(&[(*pool, *spacing)], block)
+                .ticks
+                .scan_ticks(&[(TickSource::V3(*pool), *spacing)], block)
                 .await
             else {
                 panic!("the RPC rejected the scanner override");
@@ -1149,7 +807,8 @@ mod tests {
             let scan_time = started.elapsed();
             let started = std::time::Instant::now();
             let read = source
-                .read_ticks(&[(*pool, *spacing)], block)
+                .ticks
+                .read_ticks(&[(TickSource::V3(*pool), *spacing)], block)
                 .await
                 .unwrap();
             let read_time = started.elapsed();

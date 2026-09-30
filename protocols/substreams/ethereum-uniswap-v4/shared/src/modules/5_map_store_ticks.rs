@@ -1,19 +1,13 @@
 use std::str::FromStr;
 
-use substreams::store::StoreAddBigInt;
-
 use crate::pb::uniswap::v4::{
     events::{pool_event, PoolEvent},
     Events, TickDelta, TickDeltas,
 };
 
-use substreams::{
-    scalar::BigInt,
-    store::{StoreAdd, StoreNew},
-};
+use substreams::scalar::BigInt;
 
 use anyhow::Ok;
-use substreams_helper::hex::Hexable;
 
 #[substreams::handlers::map]
 pub fn map_ticks_changes(events: Events) -> Result<TickDeltas, anyhow::Error> {
@@ -26,22 +20,7 @@ pub fn map_ticks_changes(events: Events) -> Result<TickDeltas, anyhow::Error> {
     Ok(TickDeltas { deltas: ticks_deltas })
 }
 
-#[substreams::handlers::store]
-pub fn store_ticks_liquidity(ticks_deltas: TickDeltas, store: StoreAddBigInt) {
-    let mut deltas = ticks_deltas.deltas;
-
-    deltas.sort_unstable_by_key(|delta| delta.ordinal);
-
-    deltas.iter().for_each(|delta| {
-        store.add(
-            delta.ordinal,
-            format!("pool:{0}:tick:{1}", delta.pool_address.to_hex(), delta.tick_index,),
-            BigInt::from_signed_bytes_be(&delta.liquidity_net_delta),
-        );
-    });
-}
-
-fn event_to_ticks_deltas(event: PoolEvent) -> Vec<TickDelta> {
+pub fn event_to_ticks_deltas(event: PoolEvent) -> Vec<TickDelta> {
     // On UniswapV4, the only event that changes liquidity is ModifyLiquidity. Liquidity Delta is
     // now expressed as a signed int256. A positive number indicates a mint, while a negative
     // indicates a burn.

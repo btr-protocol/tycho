@@ -1377,7 +1377,7 @@ dependencies = [
 
 [[package]]
 name = "ethereum-uniswap-v4-no-hooks"
-version = "0.4.3"
+version = "0.5.0"
 dependencies = [
  "ethabi 18.0.0",
  "ethereum-uniswap-v4-shared",
@@ -1386,13 +1386,13 @@ dependencies = [
  "rstest",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "substreams-helper 0.0.2 (git+https://github.com/propeller-heads/tycho-protocol-sdk.git?tag=0.5.0)",
- "tycho-substreams 0.6.0",
+ "substreams-helper 0.0.2",
+ "tycho-substreams 0.10.0",
 ]
 
 [[package]]
 name = "ethereum-uniswap-v4-shared"
-version = "0.5.2"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -1402,15 +1402,17 @@ dependencies = [
  "num-bigint",
  "prost 0.11.9",
  "rstest",
+ "serde",
+ "serde_json",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "substreams-helper 0.0.2 (git+https://github.com/propeller-heads/tycho-protocol-sdk.git?tag=0.5.0)",
- "tycho-substreams 0.6.0",
+ "substreams-helper 0.0.2",
+ "tycho-substreams 0.10.0",
 ]
 
 [[package]]
 name = "ethereum-uniswap-v4-with-hooks"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "ethabi 18.0.0",
@@ -1424,8 +1426,8 @@ dependencies = [
  "serde_qs 0.13.0",
  "substreams 0.5.22",
  "substreams-ethereum 0.9.13",
- "substreams-helper 0.0.2 (git+https://github.com/propeller-heads/tycho-protocol-sdk.git?tag=0.5.0)",
- "tycho-substreams 0.6.0",
+ "substreams-helper 0.0.2",
+ "tycho-substreams 0.10.0",
 ]
 
 [[package]]
