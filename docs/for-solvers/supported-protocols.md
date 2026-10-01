@@ -31,6 +31,7 @@ Currently, Tycho supports the following protocols:
 <tr><td><code>rocketpool</code></td><td>Native (<code>RocketpoolState</code>)</td><td>-</td><td>Ethereum</td><td>Note: the DepositPool was recently updated to v1.4. This new version is supported by tycho_simulation <a href="https://github.com/propeller-heads/tycho-simulation/releases/tag/0.248.0" target="_blank" rel="noopener noreferrer">> v0.248.0</a> and above.</td></tr>
 <tr><td><code>fluid_v1</code></td><td>Native (<code>FluidV1</code>)<br>[DCI indexed]</td><td>-</td><td>Ethereum</td><td>Note: paused pools are still indexed. To filter them out use <code>fluid_v1_paused_pools_filter</code>.</td></tr>
 <tr><td><code>erc4626</code></td><td>Native (<code>ERC4626State</code>)<br>[DCI indexed]</td><td>-</td><td>Ethereum</td><td>A few vaults are unsupported. Use <code>erc4626_filter</code></td></tr>
+<tr><td><code>vm:hanji</code></td><td>VM (<code>EVMPoolState</code>)<br>[DCI indexed]</td><td>-</td><td>Monad</td><td>Exact-input (sell) quotes only. One component per market's fast-quoter proxy, which has the LP manager quote just in time from maker prices bounded by Pyth. Quotes are for a contract caller, the way TychoRouter trades: the proxy prices contract callers differently from EOAs. Components carry no balances, so a TVL filter above zero drops them.</td></tr>
 </tbody>
 </table>
 
@@ -118,6 +119,7 @@ fn register_exchanges(
         Chain::Monad => {
             builder = builder
                 .exchange::<KuruState>("kuru", tvl_filter.clone(), None)
+                .exchange::<EVMPoolState<PreCachedDB>>("vm:hanji", tvl_filter.clone(), None)
         }
         _ => {}
     }

@@ -38,6 +38,7 @@ members = [
     "ethereum-sky",
     "polygon-ramses-v3",
     "ethereum-etherfi",
+    "monad-hanji",
 ]
 resolver = "2"
 

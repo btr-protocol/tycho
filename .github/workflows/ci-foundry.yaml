@@ -106,15 +106,15 @@ jobs:
         run: forge fmt --check
 
       - name: Run tests
-        run: forge test -vvv --no-match-path 'test/protocols/Kuru.t.sol'
+        run: forge test -vvv --no-match-path '{**/Kuru.t.sol,**/Hanji*.t.sol}'
 
       # Foundry runs chain 143 forks only under its Monad network.
       - name: Run Monad tests
-        run: forge test -vvv --network monad --match-path 'test/protocols/Kuru.t.sol'
-        if: matrix.project.path == 'crates/tycho-execution/contracts'
+        run: forge test -vvv --network monad --match-path '{**/Kuru.t.sol,**/Hanji*.t.sol}'
+        if: matrix.project.path != 'crates/tycho-simulation/token-proxy-contracts'
 
       - name: Gas snapshot
-        run: NO_COLOR=1 forge snapshot --no-match-path 'test/protocols/Kuru.t.sol' >> "$GITHUB_STEP_SUMMARY"
+        run: NO_COLOR=1 forge snapshot --no-match-path '{**/Kuru.t.sol,**/Hanji*.t.sol}' >> "$GITHUB_STEP_SUMMARY"
         if: matrix.project.path == 'crates/tycho-execution/contracts'
 
   # One skip job per matrix entry so each check name matches exactly what branch

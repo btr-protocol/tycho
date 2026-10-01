@@ -102,6 +102,7 @@ const deploy_protocols = {
     ],
     "monad": [
         "kuru",
+        "vm:hanji",
     ],
 };
 

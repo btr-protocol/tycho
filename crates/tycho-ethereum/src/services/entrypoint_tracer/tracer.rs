@@ -318,7 +318,7 @@ impl EntryPointTracer for EVMEntrypointService {
             let result = match &entry_point.params {
                 TracingParams::RPCTracer(rpc_entry_point) => {
                     // Use batched RPC call for both access list and trace
-                    let (accessed_slots, pre_state_trace) = match self
+                    let (mut accessed_slots, pre_state_trace) = match self
                         .batch_trace_and_access_list(
                             &entry_point.entry_point.target,
                             rpc_entry_point,
@@ -354,6 +354,15 @@ impl EntryPointTracer for EVMEntrypointService {
                             let address_bytes =
                                 tycho_common::Bytes::from(address.as_ref() as &[u8]);
                             let storage = &account.storage;
+                            // Some nodes (e.g. Monad) leave storage keys out of
+                            // `eth_createAccessList`; the prestate lists every non-zero slot read.
+                            if let Some(slots) = accessed_slots.get_mut(&address_bytes) {
+                                slots.extend(
+                                    storage
+                                        .keys()
+                                        .map(|slot| tycho_common::Bytes::from(slot.as_slice())),
+                                );
+                            }
                             for (slot, val) in storage.iter() {
                                 if let Some(storage_location) =
                                     Self::detect_retrigger(&called_addresses, slot, val)
@@ -1402,6 +1411,73 @@ mod tests {
             EVMEntrypointService::detect_retrigger(&called_addresses, &slot, &packed_value);
 
         assert!(result.is_none());
+    }
+
+    /// Some nodes (Monad) leave storage keys out of `eth_createAccessList`; the prestate keys of
+    /// the same accounts are merged in, and prestate-only accounts are not added.
+    #[tokio::test]
+    async fn test_trace_merges_prestate_slots_into_access_list() {
+        let mut server = Server::new_async().await;
+        let response_body = r#"[
+            {"jsonrpc": "2.0", "id": 0, "result": {
+                "accessList": [{
+                    "address": "0x0000000000000000000000000000000000000001",
+                    "storageKeys": ["0x0000000000000000000000000000000000000000000000000000000000000001"]
+                }],
+                "gasUsed": "0x5dc0"
+            }},
+            {"jsonrpc": "2.0", "id": 1, "result": {
+                "0x0000000000000000000000000000000000000001": {
+                    "balance": "0x1",
+                    "storage": {
+                        "0x0000000000000000000000000000000000000000000000000000000000000001": "0x0000000000000000000000000000000000000000000000000000000000000005",
+                        "0x0000000000000000000000000000000000000000000000000000000000000002": "0x0000000000000000000000000000000000000000000000000000000000000007"
+                    }
+                },
+                "0x0000000000000000000000000000000000000002": {
+                    "balance": "0x1",
+                    "storage": {
+                        "0x0000000000000000000000000000000000000000000000000000000000000003": "0x0000000000000000000000000000000000000000000000000000000000000001"
+                    }
+                }
+            }}
+        ]"#;
+        let _m = server
+            .mock("POST", "/")
+            .with_status(200)
+            .with_body(response_body)
+            .expect(1)
+            .create_async()
+            .await;
+        let rpc =
+            EthereumRpcClient::new(&server.url()).expect("Failed to create EthereumRpcClient");
+        let tracer = EVMEntrypointService::new_with_config(&rpc, 0, 10);
+        let target = Bytes::from_str("0x0000000000000000000000000000000000000001").unwrap();
+        let entry_points = vec![EntryPointWithTracingParams::new(
+            EntryPoint::new("test:func()".to_string(), target.clone(), "func()".to_string()),
+            TracingParams::RPCTracer(RPCTracerParams::new(
+                None,
+                Bytes::from(&keccak256("func()")[0..4]),
+            )),
+        )];
+        let block_hash =
+            Bytes::from_str("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+                .unwrap();
+
+        let result = tracer
+            .trace(block_hash, entry_points)
+            .await
+            .remove(0)
+            .expect("trace succeeds");
+
+        let slot = |n: u8| {
+            let mut key = [0u8; 32];
+            key[31] = n;
+            Bytes::from(key.to_vec())
+        };
+        let accessed = &result.tracing_result.accessed_slots;
+        assert_eq!(accessed.len(), 1);
+        assert_eq!(accessed[&target], HashSet::from([slot(1), slot(2)]));
     }
 
     /// Test batch response handling with different response orderings

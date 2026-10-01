@@ -277,6 +277,7 @@
     }
   },
   "monad": {
-    "kuru": { "contract": "KuruExecutor", "args": [] }
+    "kuru": { "contract": "KuruExecutor", "args": [] },
+    "vm:hanji": { "contract": "HanjiExecutor", "args": [] }
   }
 }

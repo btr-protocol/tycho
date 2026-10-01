@@ -1,0 +1,51 @@
+substreams_yaml_path: ./monad-hanji.yaml
+protocol_system: "vm:hanji"
+module_name: "map_protocol_changes"
+protocol_type_names:
+  - "hanji_market"
+adapter_contract: "HanjiSwapAdapter"
+# Hanji keeps no per-market reserves to reconcile: liquidity is the LP manager's, quoted per fill.
+skip_balance_check: true
+
+tests:
+  # Fast-quoter proxies for the first live markets, created one after another from 79242444.
+  - name: test_proxies_created
+    start_block: 79242400
+    stop_block: 79242700
+    expected_components:
+      - id: "0x1aed222dda944a87703c918745b11be13f8eef10" # MON/USDC
+        tokens:
+          - "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A" # WMON
+          - "0x754704Bc059F8C67012fEd69BC8A327a5aafb603" # USDC
+        creation_tx: "0x87867da9c9913e999d1f7fa15c3c2c1a2831d6fb1cc0a09bfbc4ad87c059cb1c"
+        skip_execution: true
+      - id: "0x0acba24cecd750badb3179fb9ee3f2cd27431778" # WETH/USDC
+        tokens:
+          - "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242" # WETH
+          - "0x754704Bc059F8C67012fEd69BC8A327a5aafb603" # USDC
+        creation_tx: "0xdea4f3302539ceb27fe759644b3f5c2f0bd0f199462510738f1b64339a895a7a"
+        skip_execution: true
+      - id: "0xc11805e92ca6a36ce9507902ab6bb5cd11e438bf" # cbBTC/USDC
+        tokens:
+          - "0xd18B7EC58Cdf4876f6AFebd3Ed1730e4Ce10414b" # cbBTC
+          - "0x754704Bc059F8C67012fEd69BC8A327a5aafb603" # USDC
+        creation_tx: "0x237a44965708fc69b4a7bced6c1416aab2fcfd3e83f5276a9833f34ebe48b8df"
+        skip_execution: true
+      - id: "0xc4adcb94d0dce7fc84e180fae3621df13ad37e06" # MON/WETH
+        tokens:
+          - "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A" # WMON
+          - "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242" # WETH
+        creation_tx: "0x1c510e776d2fc19da199999af5fb1f8e4524f0092eb990ea72a6189b0719139c"
+        skip_execution: true
+      - id: "0x012e06b56eee881603e47748931dc38efabf54ef" # cbBTC/MON
+        tokens:
+          - "0xd18B7EC58Cdf4876f6AFebd3Ed1730e4Ce10414b" # cbBTC
+          - "0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A" # WMON
+        creation_tx: "0x8065890183254b410286811843bc11a6f2015341f5a5532657d80d66b7d36b54"
+        skip_execution: true
+      - id: "0x05e028d33fa727168bc9396bdac5cab387c8a196" # cbBTC/WETH
+        tokens:
+          - "0xd18B7EC58Cdf4876f6AFebd3Ed1730e4Ce10414b" # cbBTC
+          - "0xEE8c0E9f1BFFb4Eb878d8f15f368A02a35481242" # WETH
+        creation_tx: "0xc3c967b0a442493a0938ae1d9c9d3f1e1e177622a4daf4498e9c63a8a5c9dbf9"
+        skip_execution: true
