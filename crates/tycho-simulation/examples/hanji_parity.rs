@@ -7,8 +7,10 @@
 //!      full-indexed contracts, only the DCI-traced slots for ERC-20 tokens (as the DCI does);
 //!   3. decode it through `TychoStreamDecoder` into an `EVMPoolState` running the Hanji adapter;
 //!   4. require `get_amount_out` == the proxy's own quote (`eth_call` at B, from the adapter's
-//!      address), to the wei, for random sizes on both sides — and once more with every Pyth price
-//!      the market reads made older than 60 s, where the quoter drops its oracle clamp.
+//!      address), to the wei, for random sizes on both sides.
+//!
+//! The quoter clamps on an on-chain oracle contract; the simulation runs its bytecode against
+//! storage read at B like any other traced contract, with no off-chain price service involved.
 //!
 //! Public RPCs lack `debug_storageRangeAt`, so full-indexed contracts are seeded with the slots
 //! the traced calls read instead of their whole storage; any slot the simulation reads beyond
@@ -22,28 +24,30 @@ use std::{
 
 use alloy::{
     eips::BlockId,
-    primitives::{Address, Bytes as ABytes, B256, U256},
+    primitives::{Address, B256, Bytes as ABytes, U256},
     providers::{DynProvider, Provider, ProviderBuilder},
     rpc::{
         client::RpcClient,
         types::{
-            state::{AccountOverride, StateOverride},
             TransactionRequest,
+            state::{AccountOverride, StateOverride},
         },
     },
     sol,
     sol_types::{SolCall, SolValue},
     transports::layers::RetryBackoffLayer,
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use clap::Parser;
 use num_bigint::BigUint;
 use tycho_client::feed::{
-    synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
     BlockHeader, FeedMessage,
+    synchronizer::{ComponentWithState, Snapshot, StateSyncMessage},
 };
 use tycho_common::{
+    Bytes,
     models::{
+        Chain,
         blockchain::{
             AccountOverrides, Block, EntryPoint, EntryPointWithTracingParams, RPCTracerParams,
             StorageOverride, TracingParams, TracingResult,
@@ -51,15 +55,13 @@ use tycho_common::{
         contract::Account,
         protocol::{ProtocolComponent, ProtocolComponentState},
         token::Token,
-        Chain,
     },
     traits::{AccountExtractor, EntryPointTracer, StorageSnapshotRequest},
-    Bytes,
 };
 use tycho_ethereum::{
     rpc::{
-        config::{RPCBatchingConfig, RPCRetryConfig},
         EthereumRpcClient,
+        config::{RPCBatchingConfig, RPCRetryConfig},
     },
     services::{
         account_extractor::EVMAccountExtractor, entrypoint_tracer::tracer::EVMEntrypointService,
@@ -67,19 +69,16 @@ use tycho_ethereum::{
 };
 use tycho_simulation::evm::{
     decoder::TychoStreamDecoder,
-    engine_db::{tycho_db::PreCachedDB, SHARED_TYCHO_DB},
+    engine_db::{SHARED_TYCHO_DB, tycho_db::PreCachedDB},
     protocol::vm::{constants::EXTERNAL_ACCOUNT, state::EVMPoolState},
+    tycho_models::{AccountUpdate, ChangeType},
 };
 
 const PROTOCOL: &str = "vm:hanji";
 /// Widest price the market accepts (FP24: 999999 * 10^15).
 const MAX_PRICE: u128 = 999_999_000_000_000_000_000;
-/// Pyth `PriceFeed` slots end in the publish time; anything this close to B's timestamp is one.
-const PYTH_MAX_AGE: u64 = 86_400;
 /// Error prefix for a block where the market quotes nothing fillable.
 const NO_FILL: &str = "no fillable";
-/// Age the stale case gives every Pyth price, past the quoter's 60 s window.
-const STALE_AGE: u64 = 120;
 /// The active fast-quoter proxies on Monad mainnet.
 const PROXIES: [&str; 7] = [
     "0x1aed222dda944a87703c918745b11be13f8eef10", // MON/USDC
@@ -136,6 +135,9 @@ struct Args {
     /// Check one block instead of random ones.
     #[arg(long)]
     at: Option<u64>,
+    /// Also roll each checked state forward this many blocks through storage diffs and re-check.
+    #[arg(long, default_value_t = 0)]
+    advance: u64,
 }
 
 /// One market's static wiring.
@@ -152,8 +154,6 @@ const ALT_QUOTER_SELECTOR: [u8; 4] = [0xf8, 0xbe, 0xd2, 0x5f];
 /// Unverified fast-quoter view the proxy calls to size its quotes:
 /// `(uint8 market, bool isAsk, uint128 quantity, uint128 maxValue, uint72 price)`.
 const QUOTER_VIEW_SELECTOR: [u8; 4] = [0x24, 0x67, 0x5a, 0x09];
-/// Pyth `getPriceNoOlderThan(bytes32,uint256)`.
-const PYTH_PRICE_SELECTOR: &str = "0xa4ae35e0";
 
 /// A quote request: sell `amount` of X (ask) or of Y (bid).
 #[derive(Clone, Copy)]
@@ -192,8 +192,8 @@ struct Wiring {
 }
 
 /// The entry points `monad-hanji` registers for a proxy:
-/// - a zero-fill order per side on the proxy: it walks the quote path (quoters, oracle, Pyth, LP
-///   manager, market, tries) without moving tokens;
+/// - a zero-fill order per side on the proxy: it walks the quote path (quoters, oracle, LP manager,
+///   market, tries) without moving tokens;
 /// - each token's `balanceOf` the LP manager and the market, and the LP manager's allowance to the
 ///   market: the slots a fill moves, which the DCI indexes selectively on tokens;
 /// - the market's watchdog (only called on fills) and the alternate quoter (only used for
@@ -492,47 +492,6 @@ fn as_adapter(
         .with_state_overrides(overrides)
 }
 
-/// Every Pyth `PriceFeed` slot the traces read, rewritten `STALE_AGE` seconds old.
-fn stale_pyth(
-    accessed: &HashMap<Bytes, HashSet<Bytes>>,
-    storage: &HashMap<Bytes, Account>,
-    ts: u64,
-) -> BTreeMap<Bytes, AccountOverrides> {
-    let mut out = BTreeMap::new();
-    for (a, slots) in accessed {
-        let Some(acc) = storage.get(a) else { continue };
-        let mut diff = BTreeMap::new();
-        for s in slots {
-            let Some(v) = acc.slots.get(s) else { continue };
-            let word = U256::from_be_slice(v.as_ref());
-            let publish = (word & U256::from(u64::MAX)).to::<u64>();
-            if publish > ts.saturating_sub(PYTH_MAX_AGE) &&
-                publish <= ts &&
-                word > U256::from(u64::MAX)
-            {
-                let stale: U256 = (word >> 64usize << 64usize) | U256::from(ts - STALE_AGE);
-                diff.insert(s.clone(), Bytes::from(stale.to_be_bytes::<32>().to_vec()));
-            }
-        }
-        if !diff.is_empty() && is_pyth(acc) {
-            out.insert(
-                a.clone(),
-                AccountOverrides {
-                    slots: Some(StorageOverride::Diff(diff)),
-                    native_balance: None,
-                    code: None,
-                },
-            );
-        }
-    }
-    out
-}
-
-/// Marked by `seed`, which resolves the Pyth contract from the quote path.
-fn is_pyth(acc: &Account) -> bool {
-    acc.title == "pyth"
-}
-
 /// `n` log-uniform sizes in `[lo, hi]`.
 fn sizes(ask: bool, lo: U256, hi: U256, n: usize, rng: &mut u64) -> Vec<Order> {
     let span = (u256_f64(hi) / u256_f64(lo))
@@ -555,7 +514,6 @@ fn u256_f64(v: U256) -> f64 {
 }
 
 struct Outcome {
-    stale: bool,
     matched: usize,
     unfillable: usize,
 }
@@ -568,10 +526,8 @@ async fn reference(
     block: u64,
     funding: &[(Bytes, Bytes)],
     order: Order,
-    extra: &BTreeMap<Bytes, AccountOverrides>,
 ) -> Result<Option<U256>> {
-    let mut o = funded(funding, order.amount);
-    o.extend(extra.clone());
+    let o = funded(funding, order.amount);
     let call = as_adapter(m.proxy, m.calldata(order), o);
     let raw =
         c.p.call(
@@ -595,14 +551,15 @@ async fn reference(
     }
 }
 
-/// Checks one market at one block, as indexed and with every Pyth price made stale.
+/// Checks one market at one block, as indexed.
 async fn check(
     c: &Chain_,
     m: &Market,
     block: &Block,
     samples: usize,
+    advance: u64,
     rng: &mut u64,
-) -> Result<Vec<Outcome>> {
+) -> Result<Vec<(u64, Outcome)>> {
     let b = block.number;
     let lob = c
         .call(m.proxy, lobAddressCall {}, b)
@@ -679,7 +636,7 @@ async fn check(
         let mut fillable = Vec::new();
         for k in 0..24u64 {
             let order = Order { ask, amount: unit * U256::from(10u64).pow(U256::from(k)) };
-            if reference(c, m, b, funding, order, &BTreeMap::new())
+            if reference(c, m, b, funding, order)
                 .await?
                 .is_some()
             {
@@ -742,67 +699,114 @@ async fn check(
         }
     }
 
-    let fresh = seed(c, block, m, &accessed, &reads, &tokens).await?;
-    let mut outcomes = Vec::new();
-    for stale in [false, true] {
-        let mut storage = fresh.clone();
-        let mut stale_overrides = BTreeMap::new();
-        if stale {
-            stale_overrides = stale_pyth(&reads, &storage, block_ts(block));
-            if stale_overrides.is_empty() {
-                bail!("no Pyth price slot found to make stale");
-            }
-            for (a, ov) in &stale_overrides {
-                let Some(StorageOverride::Diff(d)) = &ov.slots else { continue };
-                let acc = storage.get_mut(a).expect("seeded");
-                acc.slots.extend(
-                    d.iter()
-                        .map(|(k, v)| (k.clone(), v.clone())),
-                );
-            }
-        }
-
-        let mut expected = Vec::new();
-        for order in &orders {
-            let funding = if order.ask { &funding_x } else { &funding_y };
-            expected.push((*order, reference(c, m, b, funding, *order, &stale_overrides).await?));
-        }
-        let per_side = |ask: bool| {
-            expected
-                .iter()
-                .filter(|(o, e)| o.ask == ask && e.is_some())
-                .count()
-        };
-        if per_side(true) < samples || per_side(false) < samples {
-            bail!(
-                "stale={stale}: only {}/{} fillable sizes (ask/bid), need {samples}",
-                per_side(true),
-                per_side(false)
-            );
-        }
-
-        let state = decode(m, block, dci.clone(), storage).await?;
-        let mut out = Outcome { stale, matched: 0, unfillable: 0 };
-        for (order, want) in expected {
-            let (sell, buy) = if order.ask { (&m.x, &m.y) } else { (&m.y, &m.x) };
-            let amount = BigUint::from_bytes_be(&order.amount.to_be_bytes::<32>());
-            match (want, state.get_amount_out(amount, sell, buy)) {
-                (Some(w), Ok(g)) if g.amount == BigUint::from_bytes_be(&w.to_be_bytes::<32>()) => {
-                    out.matched += 1
-                }
-                (None, Err(_)) => out.unfillable += 1,
-                (w, g) => bail!(
-                    "stale={stale} sell {} {}: chain {:?} != sim {:?}",
-                    order.amount,
-                    sell.symbol,
-                    w,
-                    g.map(|r| r.amount)
-                ),
-            }
-        }
-        outcomes.push(out);
+    let storage = seed(c, block, &accessed, &reads, &tokens).await?;
+    let state = decode(m, block, dci, storage.clone()).await?;
+    let funding = [&funding_x[..], &funding_y[..]];
+    let mut outs = vec![(b, compare(c, m, b, &orders, funding, samples, &*state).await?)];
+    if advance > 0 {
+        // A consumer without the indexer: re-read the seeded slots at B+k (standing in for the
+        // storage diffs of B+1..B+k) and push only the changed ones into the shared DB.
+        let next = c.block(b + advance).await?;
+        let later = seed(c, &next, &accessed, &reads, &tokens).await?;
+        let updates = storage_diffs(&storage, &later);
+        let changed: usize = updates
+            .iter()
+            .map(|u| u.slots.len())
+            .sum();
+        SHARED_TYCHO_DB.update(updates, Some(header(&next)))?;
+        println!("{}/{} B+{advance}: {changed} slots changed", m.x.symbol, m.y.symbol);
+        let o = compare(c, m, next.number, &orders, funding, samples / 2, &*state).await?;
+        outs.push((next.number, o));
     }
-    Ok(outcomes)
+    Ok(outs)
+}
+
+/// The changed slots between two snapshots of the same accounts, as `SHARED_TYCHO_DB` updates.
+fn storage_diffs(
+    before: &HashMap<Bytes, Account>,
+    after: &HashMap<Bytes, Account>,
+) -> Vec<AccountUpdate> {
+    let word = |b: &Bytes| U256::from_be_slice(b.as_ref());
+    after
+        .iter()
+        .filter_map(|(a, acc)| {
+            let old = before.get(a)?;
+            let slots: HashMap<U256, U256> = acc
+                .slots
+                .iter()
+                .filter(|(k, v)| old.slots.get(*k) != Some(*v))
+                .map(|(k, v)| (word(k), word(v)))
+                .collect();
+            (!slots.is_empty()).then(|| AccountUpdate {
+                address: Address::from_slice(a),
+                chain: Chain::Monad,
+                slots,
+                balance: None,
+                code: None,
+                change: ChangeType::Update,
+            })
+        })
+        .collect()
+}
+
+/// Quotes every order on `state` and on chain at `block`; any fill mismatch fails.
+async fn compare(
+    c: &Chain_,
+    m: &Market,
+    block: u64,
+    orders: &[Order],
+    funding: [&[(Bytes, Bytes)]; 2],
+    samples: usize,
+    state: &dyn tycho_common::simulation::protocol_sim::ProtocolSim,
+) -> Result<Outcome> {
+    let mut expected = Vec::new();
+    for order in orders {
+        let f = funding[usize::from(!order.ask)];
+        expected.push((*order, reference(c, m, block, f, *order).await?));
+    }
+    let per_side = |ask: bool| {
+        expected
+            .iter()
+            .filter(|(o, e)| o.ask == ask && e.is_some())
+            .count()
+    };
+    if per_side(true) < samples || per_side(false) < samples {
+        bail!(
+            "{NO_FILL}: only {}/{} sizes (ask/bid), need {samples}",
+            per_side(true),
+            per_side(false)
+        );
+    }
+    let mut out = Outcome { matched: 0, unfillable: 0 };
+    for (order, want) in expected {
+        let (sell, buy) = if order.ask { (&m.x, &m.y) } else { (&m.y, &m.x) };
+        let amount = BigUint::from_bytes_be(&order.amount.to_be_bytes::<32>());
+        match (want, state.get_amount_out(amount, sell, buy)) {
+            (Some(w), Ok(g)) if g.amount == BigUint::from_bytes_be(&w.to_be_bytes::<32>()) => {
+                out.matched += 1
+            }
+            (None, Err(_)) => out.unfillable += 1,
+            (w, g) => bail!(
+                "block {block} sell {} {}: chain {:?} != sim {:?}",
+                order.amount,
+                sell.symbol,
+                w,
+                g.map(|r| r.amount)
+            ),
+        }
+    }
+    Ok(out)
+}
+
+fn header(block: &Block) -> BlockHeader {
+    BlockHeader {
+        hash: block.hash.clone(),
+        number: block.number,
+        parent_hash: block.parent_hash.clone(),
+        revert: false,
+        timestamp: block_ts(block),
+        partial_block_index: None,
+    }
 }
 
 fn block_ts(block: &Block) -> u64 {
@@ -814,7 +818,6 @@ fn block_ts(block: &Block) -> u64 {
 async fn seed(
     c: &Chain_,
     block: &Block,
-    m: &Market,
     accessed: &HashMap<Bytes, HashSet<Bytes>>,
     reads: &HashMap<Bytes, HashSet<Bytes>>,
     tokens: &HashSet<Bytes>,
@@ -836,62 +839,12 @@ async fn seed(
             slots: Some(slots.into_iter().collect()),
         });
     }
-    let pyth = pyth_address(c, m, block.number).await?;
     Ok(EVMAccountExtractor::new(&c.rpc, Chain::Monad)
         .get_accounts_at_block(block, &requests)
         .await?
         .into_iter()
-        .map(|(a, delta)| {
-            let mut acc = delta.into_account_without_tx();
-            if Some(&a) == pyth.as_ref() {
-                acc.title = "pyth".into();
-            }
-            (a, acc)
-        })
+        .map(|(a, delta)| (a, delta.into_account_without_tx()))
         .collect())
-}
-
-/// The Pyth contract: the callee of `getPriceNoOlderThan` on the proxy's quote path.
-async fn pyth_address(c: &Chain_, m: &Market, block: u64) -> Result<Option<Bytes>> {
-    let zero_fill = placeOrderCall {
-        isAsk: true,
-        quantity: 1,
-        price: MAX_PRICE
-            .try_into()
-            .expect("fits uint72"),
-        maxCommission: u128::MAX,
-        marketOnly: true,
-        postOnly: false,
-        transferExecutedTokens: true,
-        expires: U256::MAX,
-    }
-    .abi_encode();
-    let trace: serde_json::Value =
-        c.p.raw_request(
-            "debug_traceCall".into(),
-            (
-                serde_json::json!({"to": m.proxy, "data": format!("0x{}", hex::encode(zero_fill))}),
-                format!("0x{block:x}"),
-                serde_json::json!({"tracer": "callTracer"}),
-            ),
-        )
-        .await?;
-    fn find(v: &serde_json::Value) -> Option<String> {
-        if v["type"] == "STATICCALL" &&
-            v["input"]
-                .as_str()
-                .is_some_and(|i| i.starts_with(PYTH_PRICE_SELECTOR))
-        {
-            return v["to"].as_str().map(str::to_owned);
-        }
-        v["calls"]
-            .as_array()?
-            .iter()
-            .find_map(find)
-    }
-    find(&trace)
-        .map(|a| Bytes::from_str(&a).map_err(|e| anyhow!("bad address {a}: {e}")))
-        .transpose()
 }
 
 /// The `vm:hanji` snapshot at B, through the same decoder a Tycho client uses.
@@ -923,14 +876,7 @@ async fn decode(
         tokens: vec![m.x.address.clone(), m.y.address.clone()],
         ..Default::default()
     };
-    let header = BlockHeader {
-        hash: block.hash.clone(),
-        number: block.number,
-        parent_hash: block.parent_hash.clone(),
-        revert: false,
-        timestamp: block_ts(block),
-        partial_block_index: None,
-    };
+    let header = header(block);
     let msg = FeedMessage {
         state_msgs: HashMap::from([(
             PROTOCOL.to_string(),
@@ -1001,7 +947,7 @@ async fn main() -> Result<()> {
         for round in 0..args.rounds {
             // A block where the market quotes nothing fillable is redrawn.
             let mut attempt = 0;
-            let (b, outcomes) = loop {
+            let outcomes = loop {
                 rng ^= rng << 13;
                 rng ^= rng >> 7;
                 rng ^= rng << 17;
@@ -1009,8 +955,8 @@ async fn main() -> Result<()> {
                     .at
                     .unwrap_or(head - 5 - rng % args.lookback);
                 let block = c.block(b).await?;
-                match check(&c, &m, &block, args.samples, &mut rng).await {
-                    Ok(o) => break (b, o),
+                match check(&c, &m, &block, args.samples, args.advance, &mut rng).await {
+                    Ok(o) => break o,
                     Err(e) if e.to_string().starts_with(NO_FILL) && attempt < 3 => {
                         println!("{}/{} block {b}: {e}, redrawn", m.x.symbol, m.y.symbol);
                         attempt += 1;
@@ -1020,10 +966,10 @@ async fn main() -> Result<()> {
                     }
                 }
             };
-            for o in outcomes {
+            for (b, o) in outcomes {
                 println!(
-                    "{}/{} block {b} stale={}: {} exact, {} unfillable on both",
-                    m.x.symbol, m.y.symbol, o.stale, o.matched, o.unfillable
+                    "{}/{} block {b}: {} exact, {} unfillable on both",
+                    m.x.symbol, m.y.symbol, o.matched, o.unfillable
                 );
                 matched += o.matched;
                 unfillable += o.unfillable;
