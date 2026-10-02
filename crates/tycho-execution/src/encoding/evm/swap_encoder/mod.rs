@@ -4,6 +4,7 @@ mod balancer_v2;
 mod balancer_v3;
 mod bebop;
 mod bopamm;
+mod btr_aimm;
 mod curve;
 mod ekubo;
 mod ekubo_v3;

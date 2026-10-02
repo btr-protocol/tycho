@@ -13,6 +13,7 @@ use crate::encoding::{
         swap_encoder::{
             aerodrome_v1::AerodromeV1SwapEncoder, balancer_v2::BalancerV2SwapEncoder,
             balancer_v3::BalancerV3SwapEncoder, bebop::BebopSwapEncoder, bopamm::BopAMMSwapEncoder,
+            btr_aimm::BtrAimmSwapEncoder,
             curve::CurveSwapEncoder, ekubo::EkuboSwapEncoder, ekubo_v3::EkuboV3SwapEncoder,
             erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder,
             fallback::FallbackSwapEncoder, fermiswap::FermiSwapEncoder,
@@ -206,6 +207,9 @@ impl SwapEncoderRegistry {
             "sky" => Ok(Box::new(SkySwapEncoder::new(executor_address, self.chain, config)?)),
             "erc4626" => {
                 Ok(Box::new(ERC4626SwapEncoder::new(executor_address, self.chain, config)?))
+            }
+            "btr_aimm" => {
+                Ok(Box::new(BtrAimmSwapEncoder::new(executor_address, self.chain, config)?))
             }
             // Kuru and Hanji executors take the same packed (market, tokenIn, tokenOut) data.
             "lunarbase" | "kuru" | "vm:hanji" => {
