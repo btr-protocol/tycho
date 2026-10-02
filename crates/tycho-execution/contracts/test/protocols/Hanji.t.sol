@@ -10,6 +10,7 @@ import {
     IHanjiProxy
 } from "../../src/executors/HanjiExecutor.sol";
 import {TransferManager} from "../../src/TransferManager.sol";
+import {LeanTychoRouter, ClientFeeParams} from "../../src/LeanTychoRouter.sol";
 
 contract HanjiExecutorExposed is HanjiExecutor {
     function decodeParams(bytes calldata data)
@@ -102,8 +103,10 @@ contract HanjiExecutorTest is TestUtils {
     }
 
     function testDecodeIntegration() public view {
+        // Rust encoder output for MON/USDC (no calldata.txt entry on this
+        // branch).
         (address proxy, address tokenIn, address tokenOut) = executor.decodeParams(
-            loadCallDataFromFile("test_encode_hanji_mon_usdc")
+            hex"1aed222dda944a87703c918745b11be13f8eef103bd359c1119da7da1d913d1c4d2b7c461115433a754704bc059f8c67012fed69bc8a327a5aafb603"
         );
         assertEq(proxy, PROXY);
         assertEq(tokenIn, WMON);
@@ -132,11 +135,11 @@ contract HanjiExecutorTest is TestUtils {
         internal
         returns (uint256 out)
     {
-        uint256 snapshot = vm.snapshot();
+        uint256 snapshot = vm.snapshotState();
         HanjiTaker taker = new HanjiTaker();
         deal(ask ? WMON : USDC, address(taker), ask ? amount * 1 ether : amount);
         out = taker.fill(ask, amount);
-        vm.revertTo(snapshot);
+        vm.revertToState(snapshot);
     }
 }
 
@@ -175,5 +178,101 @@ contract HanjiTaker {
                 block.timestamp
             );
         return uint256(bought) * 1 ether;
+    }
+}
+
+/// Hanji through the lean router, Monad fork.
+contract HanjiLeanRouterTest is TestUtils {
+    address constant PROXY = 0x1aeD222dda944a87703c918745b11bE13f8eEf10;
+    address constant WMON = 0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A;
+    address constant USDC = 0x754704Bc059F8C67012fEd69BC8A327a5aafb603;
+    uint256 constant FORK_BLOCK = 109038858;
+
+    HanjiExecutor executor;
+    LeanTychoRouter router;
+    address user = makeAddr("user");
+    address receiver = makeAddr("receiver");
+
+    function setUp() public {
+        vm.createSelectFork(vm.rpcUrl("monad"), FORK_BLOCK);
+        executor = new HanjiExecutor();
+        address[] memory executors = new address[](1);
+        executors[0] = address(executor);
+        router = new LeanTychoRouter(executors);
+    }
+
+    function testSingleSwapSellX() public {
+        // Whole shares only: nothing is left over at the router.
+        uint256 out = _single(WMON, USDC, 1000 ether);
+        assertGt(out, 0);
+        assertEq(IERC20(USDC).balanceOf(receiver), out);
+        _assertRouterClean(WMON, USDC);
+    }
+
+    function testSingleSwapSellY() public {
+        uint256 out = _single(USDC, WMON, 30e6);
+        assertGt(out, 0);
+        assertEq(IERC20(WMON).balanceOf(receiver), out);
+        // Share rounding may leave a USDC remainder; the output is wrapped
+        // and forwarded, and no native or allowance is left.
+        assertEq(IERC20(WMON).balanceOf(address(router)), 0);
+        assertEq(address(router).balance, 0);
+        assertEq(IERC20(USDC).allowance(address(router), PROXY), 0);
+        assertLt(IERC20(USDC).balanceOf(address(router)), 1e6);
+    }
+
+    function testSingleSwapRevertsOnUnknownExecutor() public {
+        deal(WMON, user, 1000 ether);
+        vm.startPrank(user);
+        IERC20(WMON).approve(address(router), 1000 ether);
+        address rogue = address(new HanjiExecutor());
+        vm.expectRevert(
+            abi.encodeWithSelector(LeanTychoRouter.BadExecutor.selector, rogue)
+        );
+        router.singleSwap(
+            1000 ether,
+            WMON,
+            USDC,
+            0,
+            0,
+            receiver,
+            ClientFeeParams(0, address(0), 0, 0, ""),
+            abi.encodePacked(rogue, PROXY, WMON, USDC)
+        );
+        vm.stopPrank();
+    }
+
+    function _single(address tokenIn, address tokenOut, uint256 amountIn)
+        internal
+        returns (uint256 out)
+    {
+        deal(tokenIn, user, amountIn);
+        vm.startPrank(user);
+        IERC20(tokenIn).approve(address(router), amountIn);
+        uint256 g = gasleft();
+        out = router.singleSwap(
+            amountIn,
+            tokenIn,
+            tokenOut,
+            0,
+            1,
+            receiver,
+            ClientFeeParams(0, address(0), 0, 0, ""),
+            abi.encodePacked(address(executor), PROXY, tokenIn, tokenOut)
+        );
+        emit log_named_uint("lean router singleSwap gas", g - gasleft());
+        vm.stopPrank();
+        assertEq(IERC20(tokenIn).balanceOf(user), 0);
+    }
+
+    function _assertRouterClean(address tokenIn, address tokenOut)
+        internal
+        view
+    {
+        assertEq(IERC20(tokenIn).balanceOf(address(router)), 0);
+        assertEq(IERC20(tokenOut).balanceOf(address(router)), 0);
+        assertEq(address(router).balance, 0);
+        assertEq(IERC20(tokenIn).allowance(address(router), PROXY), 0);
+        assertEq(IERC20(tokenOut).allowance(address(router), PROXY), 0);
     }
 }
