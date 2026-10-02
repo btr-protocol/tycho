@@ -309,6 +309,7 @@ mod tests {
             Chain::Polygon,
             Chain::Plasma,
             Chain::Robinhood,
+            Chain::Monad,
         ];
         for chain in chains {
             let registry = SwapEncoderRegistry::new_with_defaults(chain).unwrap_or_else(|e| {
@@ -319,6 +320,36 @@ mod tests {
                     .get_encoder("uniswap_v3")
                     .is_some(),
                 "chain {chain} is missing the uniswap_v3 encoder"
+            );
+        }
+    }
+
+    /// Every Monad protocol in the shipped config resolves to its configured executor, and the
+    /// router address is set.
+    #[test]
+    fn test_monad_default_config_resolves() {
+        use crate::encoding::evm::constants::get_router_address;
+
+        assert_eq!(
+            get_router_address(&Chain::Monad).unwrap(),
+            &Bytes::from_str("0xbbbbbbb0085A5C0BA0bd40C6Bb048685d4e73Dac").unwrap()
+        );
+        let registry = SwapEncoderRegistry::new_with_defaults(Chain::Monad).unwrap();
+        for (protocol, executor) in [
+            ("uniswap_v3", "0xbbbbbbb01f183CaF30f9269dA665b3c47449aC83"),
+            ("pancakeswap_v3", "0xbbbbbbb01f183CaF30f9269dA665b3c47449aC83"),
+            ("uniswap_v4", "0xBBBBBBB0331B1e4ac5F821ef928918f014598f5f"),
+            ("vm:balancer_v3", "0xbbbbbbb0352D36e84725A91732F65Ee03D5e423E"),
+            ("vm:curve", "0xbbbbbbb03625B037f6317301A68Bc73beD14160B"),
+            ("kuru", "0xbbbbbbb03e8Ef4278A52DC145a4408D1015bb854"),
+        ] {
+            let encoder = registry
+                .get_encoder(protocol)
+                .unwrap_or_else(|| panic!("no encoder resolved for {protocol} on monad"));
+            assert_eq!(
+                encoder.executor_address(),
+                &Bytes::from_str(executor).unwrap(),
+                "{protocol}"
             );
         }
     }

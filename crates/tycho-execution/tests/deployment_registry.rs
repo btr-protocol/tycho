@@ -161,6 +161,7 @@ fn chain_heading(chain_name: &str) -> &str {
         "polygon" => "Polygon",
         "plasma" => "Plasma",
         "robinhood" => "Robinhood",
+        "monad" => "Monad",
         _ => panic!("missing documentation heading for {chain_name}"),
     }
 }
@@ -249,7 +250,12 @@ fn active_registry_matches_runtime_address_configs() {
         );
         assert_eq!(chain["router"]["address"], *router_address, "{chain_name} router");
         assert_eq!(chain["executors"], executors[chain_name], "{chain_name} executors");
-        assert_eq!(chain["superseded"][0]["status"], "superseded");
+        for superseded in chain["superseded"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{chain_name} superseded must be an array"))
+        {
+            assert_eq!(superseded["status"], "superseded", "{chain_name} superseded");
+        }
 
         let fee_calculator = chain["fee_calculator"]["address"]
             .as_str()

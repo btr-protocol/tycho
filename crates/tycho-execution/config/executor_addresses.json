@@ -97,5 +97,14 @@
     "native_wrapper": "0x6EAd915f443eB0f8758BE58aFE7eF2dF1e2B927F",
     "rfq:metric": "0x8C18318338915839199271e7f006BEeAdBa2Dd0E",
     "rfq:native": "0x3E3F6eb0f1e98Aa300dbECdF0dBC7d5E6870812D"
+  },
+  "monad": {
+    "uniswap_v3": "0xbbbbbbb01f183CaF30f9269dA665b3c47449aC83",
+    "pancakeswap_v3": "0xbbbbbbb01f183CaF30f9269dA665b3c47449aC83",
+    "uniswap_v4": "0xBBBBBBB0331B1e4ac5F821ef928918f014598f5f",
+    "vm:balancer_v3": "0xbbbbbbb0352D36e84725A91732F65Ee03D5e423E",
+    "vm:curve": "0xbbbbbbb03625B037f6317301A68Bc73beD14160B",
+    "native_wrapper": "0xbbbbbbb03b6F50A52BCCF194E6e2f03A18462849",
+    "kuru": "0xbbbbbbb03e8Ef4278A52DC145a4408D1015bb854"
   }
 }

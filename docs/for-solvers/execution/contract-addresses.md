@@ -18,6 +18,7 @@ Protocol-specific routes may also depend on constructor or integration addresses
 | Polygon | Active | 1 September 2026 | None |
 | Plasma | Active | 1 September 2026 | None |
 | Robinhood | Active | 1 September 2026 | None |
+| Monad | Active | 2 October 2026 | None |
 
 ## Scheduled successors
 
@@ -166,6 +167,20 @@ Commit <a href="https://github.com/propeller-heads/tycho/commit/91b7f1511facc4ea
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/3eb6a5d43541403874963b712bb5941da0bdf16b/crates/tycho-execution/contracts/src/executors/NativeWrapExecutor.sol" target="_blank" rel="noopener noreferrer">NativeWrapExecutor</a></td><td><a href="https://robinhoodchain.blockscout.com/address/0x6EAd915f443eB0f8758BE58aFE7eF2dF1e2B927F" target="_blank" rel="noopener noreferrer">0x6EAd915f443eB0f8758BE58aFE7eF2dF1e2B927F</a></td></tr>
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/22b4871b7e6cd1c26f84b27c5f1813d39e98a478/crates/tycho-execution/contracts/src/executors/MetricExecutor.sol" target="_blank" rel="noopener noreferrer">MetricExecutor</a></td><td><a href="https://robinhoodchain.blockscout.com/address/0x8C18318338915839199271e7f006BEeAdBa2Dd0E" target="_blank" rel="noopener noreferrer">0x8C18318338915839199271e7f006BEeAdBa2Dd0E</a></td></tr>
 <tr><td><a href="https://github.com/propeller-heads/tycho/blob/c3966fdc030989ed7d1b0bbaf8a9aa6fee67edab/crates/tycho-execution/contracts/src/executors/NativeExecutor.sol" target="_blank" rel="noopener noreferrer">NativeExecutor</a></td><td><a href="https://robinhoodchain.blockscout.com/address/0x3E3F6eb0f1e98Aa300dbECdF0dBC7d5E6870812D" target="_blank" rel="noopener noreferrer">0x3E3F6eb0f1e98Aa300dbECdF0dBC7d5E6870812D</a></td></tr>
+</tbody></table>
+
+## Monad
+
+<table data-full-width="false"><thead><tr><th>Contract</th><th width="484">Address</th></tr></thead><tbody>
+<tr><td><a href="https://github.com/btr-protocol/tycho/blob/da95dc140c52f3f66a41ef4575b3a29d8a45e39c/crates/tycho-execution/contracts/src/TychoRouterV3.sol" target="_blank" rel="noopener noreferrer">TychoRouterV3</a></td><td><a href="https://monadscan.com/address/0xbbbbbbb0085A5C0BA0bd40C6Bb048685d4e73Dac" target="_blank" rel="noopener noreferrer">0xbbbbbbb0085A5C0BA0bd40C6Bb048685d4e73Dac</a></td></tr>
+<tr><td><a href="https://github.com/btr-protocol/tycho/blob/da95dc140c52f3f66a41ef4575b3a29d8a45e39c/crates/tycho-execution/contracts/src/FeeCalculator.sol" target="_blank" rel="noopener noreferrer">FeeCalculator</a></td><td><a href="https://monadscan.com/address/0xbbbbbbb00e29099124a3de9ACE5D7A64DAd8f8Fe" target="_blank" rel="noopener noreferrer">0xbbbbbbb00e29099124a3de9ACE5D7A64DAd8f8Fe</a></td></tr>
+<tr><td><a href="https://github.com/btr-protocol/tycho/blob/da95dc140c52f3f66a41ef4575b3a29d8a45e39c/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol" target="_blank" rel="noopener noreferrer">UniswapV3Executor</a></td><td><a href="https://monadscan.com/address/0xbbbbbbb01f183CaF30f9269dA665b3c47449aC83" target="_blank" rel="noopener noreferrer">0xbbbbbbb01f183CaF30f9269dA665b3c47449aC83</a></td></tr>
+<tr><td><a href="https://github.com/btr-protocol/tycho/blob/da95dc140c52f3f66a41ef4575b3a29d8a45e39c/crates/tycho-execution/contracts/src/executors/UniswapV3Executor.sol" target="_blank" rel="noopener noreferrer">PancakeswapV3Executor</a></td><td><a href="https://monadscan.com/address/0xbbbbbbb01f183CaF30f9269dA665b3c47449aC83" target="_blank" rel="noopener noreferrer">0xbbbbbbb01f183CaF30f9269dA665b3c47449aC83</a></td></tr>
+<tr><td><a href="https://github.com/btr-protocol/tycho/blob/da95dc140c52f3f66a41ef4575b3a29d8a45e39c/crates/tycho-execution/contracts/src/executors/UniswapV4Executor.sol" target="_blank" rel="noopener noreferrer">UniswapV4Executor</a></td><td><a href="https://monadscan.com/address/0xBBBBBBB0331B1e4ac5F821ef928918f014598f5f" target="_blank" rel="noopener noreferrer">0xBBBBBBB0331B1e4ac5F821ef928918f014598f5f</a></td></tr>
+<tr><td><a href="https://github.com/btr-protocol/tycho/blob/da95dc140c52f3f66a41ef4575b3a29d8a45e39c/crates/tycho-execution/contracts/src/executors/BalancerV3Executor.sol" target="_blank" rel="noopener noreferrer">BalancerV3Executor</a></td><td><a href="https://monadscan.com/address/0xbbbbbbb0352D36e84725A91732F65Ee03D5e423E" target="_blank" rel="noopener noreferrer">0xbbbbbbb0352D36e84725A91732F65Ee03D5e423E</a></td></tr>
+<tr><td><a href="https://github.com/btr-protocol/tycho/blob/da95dc140c52f3f66a41ef4575b3a29d8a45e39c/crates/tycho-execution/contracts/src/executors/CurveExecutor.sol" target="_blank" rel="noopener noreferrer">CurveExecutor</a></td><td><a href="https://monadscan.com/address/0xbbbbbbb03625B037f6317301A68Bc73beD14160B" target="_blank" rel="noopener noreferrer">0xbbbbbbb03625B037f6317301A68Bc73beD14160B</a></td></tr>
+<tr><td><a href="https://github.com/btr-protocol/tycho/blob/da95dc140c52f3f66a41ef4575b3a29d8a45e39c/crates/tycho-execution/contracts/src/executors/NativeWrapExecutor.sol" target="_blank" rel="noopener noreferrer">NativeWrapExecutor</a></td><td><a href="https://monadscan.com/address/0xbbbbbbb03b6F50A52BCCF194E6e2f03A18462849" target="_blank" rel="noopener noreferrer">0xbbbbbbb03b6F50A52BCCF194E6e2f03A18462849</a></td></tr>
+<tr><td><a href="https://github.com/btr-protocol/tycho/blob/da95dc140c52f3f66a41ef4575b3a29d8a45e39c/crates/tycho-execution/contracts/src/executors/KuruExecutor.sol" target="_blank" rel="noopener noreferrer">KuruExecutor</a></td><td><a href="https://monadscan.com/address/0xbbbbbbb03e8Ef4278A52DC145a4408D1015bb854" target="_blank" rel="noopener noreferrer">0xbbbbbbb03e8Ef4278A52DC145a4408D1015bb854</a></td></tr>
 </tbody></table>
 
 ## Router V2
