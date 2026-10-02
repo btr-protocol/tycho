@@ -336,16 +336,18 @@ mod tests {
 
         assert_eq!(
             get_router_address(&Chain::Monad).unwrap(),
-            &Bytes::from_str("0xbbbbbbb0085A5C0BA0bd40C6Bb048685d4e73Dac").unwrap()
+            &Bytes::from_str("0xbbbbbbb0D9624972f8aeE649A55C8a6535eDB8D3").unwrap()
         );
         let registry = SwapEncoderRegistry::new_with_defaults(Chain::Monad).unwrap();
         for (protocol, executor) in [
             ("uniswap_v3", "0xbbbbbbb01f183CaF30f9269dA665b3c47449aC83"),
             ("pancakeswap_v3", "0xbbbbbbb01f183CaF30f9269dA665b3c47449aC83"),
-            ("uniswap_v4", "0xBBBBBBB0331B1e4ac5F821ef928918f014598f5f"),
+            ("uniswap_v4", "0xbbbbbbb0497a47C7FAA2A72AB33716FEe4B8261D"),
             ("vm:balancer_v3", "0xbbbbbbb0352D36e84725A91732F65Ee03D5e423E"),
             ("vm:curve", "0xbbbbbbb03625B037f6317301A68Bc73beD14160B"),
             ("kuru", "0xbbbbbbb03e8Ef4278A52DC145a4408D1015bb854"),
+            ("vm:hanji", "0xbbbbbbb0E998aF620222a1811d4D966971bb8aEF"),
+            ("btr_aimm", "0xbbbbbbb0eA162Fb0dc7BA151F34214B7bc1C3626"),
         ] {
             let encoder = registry
                 .get_encoder(protocol)

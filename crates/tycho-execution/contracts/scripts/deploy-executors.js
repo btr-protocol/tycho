@@ -107,6 +107,7 @@ const deploy_protocols = {
         "native_wrapper",
         "kuru",
         "vm:hanji",
+        "btr_aimm",
     ],
 };
 

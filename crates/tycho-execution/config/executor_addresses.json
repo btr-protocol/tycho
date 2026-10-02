@@ -101,10 +101,12 @@
   "monad": {
     "uniswap_v3": "0xbbbbbbb01f183CaF30f9269dA665b3c47449aC83",
     "pancakeswap_v3": "0xbbbbbbb01f183CaF30f9269dA665b3c47449aC83",
-    "uniswap_v4": "0xBBBBBBB0331B1e4ac5F821ef928918f014598f5f",
+    "uniswap_v4": "0xbbbbbbb0497a47C7FAA2A72AB33716FEe4B8261D",
     "vm:balancer_v3": "0xbbbbbbb0352D36e84725A91732F65Ee03D5e423E",
     "vm:curve": "0xbbbbbbb03625B037f6317301A68Bc73beD14160B",
     "native_wrapper": "0xbbbbbbb03b6F50A52BCCF194E6e2f03A18462849",
-    "kuru": "0xbbbbbbb03e8Ef4278A52DC145a4408D1015bb854"
+    "kuru": "0xbbbbbbb03e8Ef4278A52DC145a4408D1015bb854",
+    "vm:hanji": "0xbbbbbbb0E998aF620222a1811d4D966971bb8aEF",
+    "btr_aimm": "0xbbbbbbb0eA162Fb0dc7BA151F34214B7bc1C3626"
   }
 }
