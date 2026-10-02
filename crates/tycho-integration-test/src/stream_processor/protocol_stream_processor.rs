@@ -461,6 +461,13 @@ impl ProtocolStreamProcessor {
                 stream =
                     stream.exchange::<RingSwapV2State>("ring_swap_v2", tvl_filter.clone(), None);
             }
+            "vm:hanji" => {
+                stream = stream.exchange::<EVMPoolState<PreCachedDB>>(
+                    "vm:hanji",
+                    tvl_filter.clone(),
+                    None,
+                );
+            }
             "vm:balancer_v3" => {
                 stream =
                     stream.exchange::<BalancerV3State>("vm:balancer_v3", tvl_filter.clone(), None);
