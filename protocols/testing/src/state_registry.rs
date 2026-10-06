@@ -1,3 +1,5 @@
+#[cfg(feature = "btr-aimm")]
+use tycho_simulation::evm::protocol::btr_aimm::state::BtrAimmState;
 use tycho_simulation::{
     evm::{
         engine_db::tycho_db::PreCachedDB,
@@ -115,6 +117,13 @@ pub fn register_protocol(
             decoder_context,
         ),
         "kuru" => stream_builder.exchange_with_decoder_context::<KuruState>(
+            protocol_system,
+            tvl_filter,
+            None,
+            decoder_context,
+        ),
+        #[cfg(feature = "btr-aimm")]
+        "btr_aimm" => stream_builder.exchange_with_decoder_context::<BtrAimmState>(
             protocol_system,
             tvl_filter,
             None,

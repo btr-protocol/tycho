@@ -38,9 +38,12 @@ sol! {
     event MarketStateUpdated(uint8 previousState, uint8 newState);
 }
 
+/// Block number, bids, asks: price -> size.
+pub type L2 = (u64, BTreeMap<u32, U256>, BTreeMap<u32, U256>);
+
 /// `getL2Book()` bytes: block number, (price, size) bids best-first, a 0 word, asks best-first.
-pub fn parse_l2(data: &[u8]) -> Result<(u64, BTreeMap<u32, U256>, BTreeMap<u32, U256>), String> {
-    if data.len() % 32 != 0 || data.len() < 64 {
+pub fn parse_l2(data: &[u8]) -> Result<L2, String> {
+    if !data.len().is_multiple_of(32) || data.len() < 64 {
         return Err(format!("L2 length {}", data.len()));
     }
     let w: Vec<U256> = data

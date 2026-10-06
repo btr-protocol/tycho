@@ -27,3 +27,7 @@ tycho-test = { workspace = true }
 
 [dev-dependencies]
 rstest = { workspace = true }
+
+[features]
+# BTR AIMM sim (private ssh dependency): off by default, see tycho-simulation/Cargo.toml.
+btr-aimm = ["tycho-simulation/btr-aimm"]

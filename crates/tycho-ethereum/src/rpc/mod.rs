@@ -91,6 +91,17 @@ impl EthereumRpcClient {
         Ok(Self { inner: rpc, batching, retry_policy, url: rpc_url.to_string() })
     }
 
+    /// Over an existing client (its own layers: rate budget, failover); `url` labels it only.
+    /// Default batching and retry, as [`Self::new`].
+    pub fn from_client(inner: ReqwestClient, url: &str) -> Self {
+        Self {
+            inner,
+            batching: RPCBatchingConfig::enabled_with_defaults(),
+            retry_policy: RPCRetryConfig::default().into(),
+            url: url.to_string(),
+        }
+    }
+
     pub fn get_url(&self) -> &str {
         &self.url
     }
