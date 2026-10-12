@@ -455,14 +455,16 @@ where
     /// Computes the spot price for a single `(sell, buy)` pair against `live_snapshot`'s overrides
     /// (or the plain indexed state when `None`): via the adapter's `price` function when the pool
     /// has the `PriceFunction` capability, otherwise approximated as a two-swap finite difference.
-    /// Does not touch the cache.
+    /// Returns `None` when the direction has no fillable size to probe (a market whose fast
+    /// quoter is quiet and whose book is empty reports a zero sell limit), so the pair simply has
+    /// no spot price instead of the probe reverting the whole state. Does not touch the cache.
     fn compute_spot_price(
         &self,
         tokens: &HashMap<Bytes, Token>,
         sell_token_address: Address,
         buy_token_address: Address,
         live_snapshot: Option<&OverrideSnapshot>,
-    ) -> Result<f64, SimulationError> {
+    ) -> Result<Option<f64>, SimulationError> {
         let block_overrides = self.block_env(live_snapshot);
         if self
             .capabilities
@@ -493,17 +495,19 @@ where
                 .capabilities
                 .contains(&Capability::ScaledPrice)
             {
-                Ok(*price_result.first().ok_or_else(|| {
+                Ok(Some(*price_result.first().ok_or_else(|| {
                     SimulationError::FatalError("Calculated price array is empty".to_string())
-                })?)
+                })?))
             } else {
                 let unscaled_price = price_result.first().ok_or_else(|| {
                     SimulationError::FatalError("Calculated price array is empty".to_string())
                 })?;
                 let sell_token_decimals = self.get_decimals(tokens, &sell_token_address)?;
                 let buy_token_decimals = self.get_decimals(tokens, &buy_token_address)?;
-                Ok(*unscaled_price * 10f64.powi(sell_token_decimals as i32) /
-                    10f64.powi(buy_token_decimals as i32))
+                Ok(Some(
+                    *unscaled_price * 10f64.powi(sell_token_decimals as i32) /
+                        10f64.powi(buy_token_decimals as i32),
+                ))
             }
         } else {
             // If the pool does not support price function, we need to calculate spot prices by
@@ -514,49 +518,53 @@ where
                 live_snapshot,
             )?);
 
-            // Calculate the first sell amount (x1) as 1% of the maximum limit.
-            let x1 =
-                self.get_amount_limits(
+            // Calculate the first sell amount (x1) as 1% of the maximum limit. A market with no
+            // fillable size on this side reports a zero limit: there is no price to derive, and
+            // probing it would revert (e.g. Hanji's `TooSmall`), so report no price.
+            let sell_limit = self
+                .get_amount_limits(
                     vec![sell_token_address, buy_token_address],
                     overwrites.clone(),
                     block_overrides.clone(),
                 )?
-                .0 / U256::from(100);
+                .0;
+            let Some(x1) = finite_difference_probe(sell_limit) else {
+                return Ok(None);
+            };
 
             // Calculate the second sell amount (x2) as x1 + 1% of x1. 1.01% of the max limit
             let x2 = x1 + (x1 / U256::from(100));
 
             // Perform a swap for the first sell amount (x1) and retrieve the received amount
-            // (y1).
-            let y1 = self
-                .adapter_contract
-                .swap(
-                    &self.id,
-                    sell_token_address,
-                    buy_token_address,
-                    false,
-                    x1,
-                    overwrites.clone(),
-                    block_overrides.clone(),
-                )?
-                .0
-                .received_amount;
+            // (y1). A probe that reverts means the side cannot fill even 1% of its advertised
+            // limit (a sub-share book): no price is derivable, so report none instead of failing.
+            let y1 = match self.adapter_contract.swap(
+                &self.id,
+                sell_token_address,
+                buy_token_address,
+                false,
+                x1,
+                overwrites.clone(),
+                block_overrides.clone(),
+            ) {
+                Ok((trade, _)) => trade.received_amount,
+                Err(_) => return Ok(None),
+            };
 
             // Perform a swap for the second sell amount (x2) and retrieve the received amount
             // (y2).
-            let y2 = self
-                .adapter_contract
-                .swap(
-                    &self.id,
-                    sell_token_address,
-                    buy_token_address,
-                    false,
-                    x2,
-                    overwrites,
-                    block_overrides.clone(),
-                )?
-                .0
-                .received_amount;
+            let y2 = match self.adapter_contract.swap(
+                &self.id,
+                sell_token_address,
+                buy_token_address,
+                false,
+                x2,
+                overwrites,
+                block_overrides.clone(),
+            ) {
+                Ok((trade, _)) => trade.received_amount,
+                Err(_) => return Ok(None),
+            };
 
             let sell_token_decimals = self.get_decimals(tokens, &sell_token_address)?;
             let buy_token_decimals = self.get_decimals(tokens, &buy_token_address)?;
@@ -574,7 +582,7 @@ where
                     "Failed to compute marginal price: denominator converted to 0".into(),
                 ));
             }
-            Ok(num_f64 / den_f64 * token_correction)
+            Ok(Some(num_f64 / den_f64 * token_correction))
         }
     }
 
@@ -601,8 +609,10 @@ where
                 live_snapshot,
             )?;
 
-            self.caches
-                .insert_spot_price((sell_token_address, buy_token_address), price);
+            if let Some(price) = price {
+                self.caches
+                    .insert_spot_price((sell_token_address, buy_token_address), price);
+            }
         }
 
         Ok(())
@@ -1066,6 +1076,15 @@ where
     }
 }
 
+/// The first finite-difference spot-price probe size: 1% of the sell limit, or `None` when that
+/// rounds to zero. A market with no fillable size on a side reports a zero sell limit, and probing
+/// it with 0 would revert the adapter (e.g. Hanji's `TooSmall`), failing the whole state decode;
+/// the callers treat `None` as "this direction has no spot price".
+fn finite_difference_probe(sell_limit: U256) -> Option<U256> {
+    let x1 = sell_limit / U256::from(100);
+    (x1 != U256::ZERO).then_some(x1)
+}
+
 impl<D> Serialize for EVMPoolState<D>
 where
     D: EngineDatabaseInterface + Clone + Debug,
@@ -1138,7 +1157,13 @@ where
             (base.address.clone(), base.clone()),
             (quote.address.clone(), quote.clone()),
         ]);
-        let price = self.compute_spot_price(&tokens, base_address, quote_address, None)?;
+        let price = self
+            .compute_spot_price(&tokens, base_address, quote_address, None)?
+            .ok_or_else(|| {
+                SimulationError::FatalError(format!(
+                    "Spot price not found for base token {base_address} and quote token {quote_address}: no fillable liquidity"
+                ))
+            })?;
         self.caches
             .insert_spot_price((base_address, quote_address), price);
         Ok(price)
@@ -1291,6 +1316,17 @@ mod tests {
         simulation::SimulationEngine,
         tycho_models::AccountUpdate,
     };
+
+    /// An empty side must not be probed: a zero sell limit (or one whose 1% rounds to zero) would
+    /// call the adapter with 0 and revert the whole state decode (Hanji's `TooSmall`, the
+    /// `0x42128ec3` seed failure). The probe size is only defined once 1% is at least 1 unit.
+    #[test]
+    fn test_finite_difference_probe_skips_an_empty_side() {
+        assert_eq!(finite_difference_probe(U256::ZERO), None);
+        assert_eq!(finite_difference_probe(U256::from(99u64)), None);
+        assert_eq!(finite_difference_probe(U256::from(100u64)), Some(U256::from(1u64)));
+        assert_eq!(finite_difference_probe(U256::from(1_000u64)), Some(U256::from(10u64)));
+    }
 
     fn dai() -> Token {
         Token::new(
