@@ -109,6 +109,20 @@ impl DerivedCaches {
             .insert(key, price);
     }
 
+    /// Replaces a pair's derived price with a warm-up result: `Some` stores it, `None` removes it
+    /// so a pair that has become unpriced is never served from an earlier warm-up.
+    fn set_spot_price(&self, key: (Address, Address), price: Option<f64>) {
+        let mut state = self.write();
+        match price {
+            Some(price) => {
+                state.spot_prices.insert(key, price);
+            }
+            None => {
+                state.spot_prices.remove(&key);
+            }
+        }
+    }
+
     fn get_limits(&self, key: (Address, Address), context: &LimitContext) -> Option<(U256, U256)> {
         let state = self.read();
         if state.limit_context.as_ref() != Some(context) {
@@ -536,35 +550,37 @@ where
             let x2 = x1 + (x1 / U256::from(100));
 
             // Perform a swap for the first sell amount (x1) and retrieve the received amount
-            // (y1). A probe that reverts means the side cannot fill even 1% of its advertised
-            // limit (a sub-share book): no price is derivable, so report none instead of failing.
-            let y1 = match self.adapter_contract.swap(
-                &self.id,
-                sell_token_address,
-                buy_token_address,
-                false,
-                x1,
-                overwrites.clone(),
-                block_overrides.clone(),
-            ) {
-                Ok((trade, _)) => trade.received_amount,
-                Err(_) => return Ok(None),
-            };
+            // (y1). A reverting probe is a real fault (or a book thinner than the advertised
+            // limit): it is reported as-is, so `run_with_indexed_fallback` and diagnostics apply.
+            let y1 = self
+                .adapter_contract
+                .swap(
+                    &self.id,
+                    sell_token_address,
+                    buy_token_address,
+                    false,
+                    x1,
+                    overwrites.clone(),
+                    block_overrides.clone(),
+                )?
+                .0
+                .received_amount;
 
             // Perform a swap for the second sell amount (x2) and retrieve the received amount
             // (y2).
-            let y2 = match self.adapter_contract.swap(
-                &self.id,
-                sell_token_address,
-                buy_token_address,
-                false,
-                x2,
-                overwrites,
-                block_overrides.clone(),
-            ) {
-                Ok((trade, _)) => trade.received_amount,
-                Err(_) => return Ok(None),
-            };
+            let y2 = self
+                .adapter_contract
+                .swap(
+                    &self.id,
+                    sell_token_address,
+                    buy_token_address,
+                    false,
+                    x2,
+                    overwrites,
+                    block_overrides.clone(),
+                )?
+                .0
+                .received_amount;
 
             let sell_token_decimals = self.get_decimals(tokens, &sell_token_address)?;
             let buy_token_decimals = self.get_decimals(tokens, &buy_token_address)?;
@@ -609,10 +625,10 @@ where
                 live_snapshot,
             )?;
 
-            if let Some(price) = price {
-                self.caches
-                    .insert_spot_price((sell_token_address, buy_token_address), price);
-            }
+            // A re-warm may find a pair that was priced before now unpriced: remove it rather
+            // than leave the stale value for `spot_price` to serve.
+            self.caches
+                .set_spot_price((sell_token_address, buy_token_address), price);
         }
 
         Ok(())
@@ -1326,6 +1342,21 @@ mod tests {
         assert_eq!(finite_difference_probe(U256::from(99u64)), None);
         assert_eq!(finite_difference_probe(U256::from(100u64)), Some(U256::from(1u64)));
         assert_eq!(finite_difference_probe(U256::from(1_000u64)), Some(U256::from(10u64)));
+    }
+
+    /// A warm-up that derives no price must not leave an earlier price for the pair: `spot_price`
+    /// serves the cache before recomputing, so a rewarmed state that went unpriced would otherwise
+    /// keep quoting a stale value.
+    #[test]
+    fn test_set_spot_price_replaces_with_none() {
+        let caches = DerivedCaches::default();
+        let key = (dai_addr(), bal_addr());
+        caches.set_spot_price(key, Some(1.5));
+        assert_eq!(caches.get_spot_price(key), Some(1.5));
+        caches.set_spot_price(key, None);
+        assert_eq!(caches.get_spot_price(key), None);
+        caches.set_spot_price(key, Some(2.5));
+        assert_eq!(caches.get_spot_price(key), Some(2.5));
     }
 
     fn dai() -> Token {
