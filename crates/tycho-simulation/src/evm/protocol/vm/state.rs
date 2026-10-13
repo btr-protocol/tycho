@@ -564,6 +564,12 @@ where
 
         // Calculate the second sell amount (x2) as x1 + 1% of x1. 1.01% of the max limit
         let x2 = x1 + (x1 / U256::from(100));
+        // Below a probe size of 100 the 1% step floors to zero and x2 == x1: there is no
+        // finite difference to take, so this direction has no price either (a dust book is
+        // unpriced, not a failed decode that drops the whole market).
+        if x2 == x1 {
+            return Ok(None);
+        }
 
         // Perform a swap for the first sell amount (x1) and retrieve the received amount
         // (y1).
@@ -1851,6 +1857,25 @@ mod tests {
                 .unwrap(),
             None
         );
+
+        // A dust side (a probe size under 100, where the 1% step floors to zero) is
+        // unpriced too, not a denominator-zero error that fails the decode.
+        for dust in [U256::from(100u64), U256::from(9999u64)] {
+            assert_eq!(
+                pool_state
+                    .finite_difference_probe(
+                        &tokens,
+                        dai_addr(),
+                        bal_addr(),
+                        dust,
+                        overwrites.clone(),
+                        None,
+                    )
+                    .unwrap(),
+                None,
+                "sell limit {dust}"
+            );
+        }
 
         // A fillable side still prices exactly as the pre-fix inline math: byte-identical to
         // the value pinned in `test_set_spot_prices_without_capability`.
