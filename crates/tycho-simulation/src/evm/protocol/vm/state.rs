@@ -103,10 +103,14 @@ impl DerivedCaches {
             .copied()
     }
 
-    fn insert_spot_price(&self, key: (Address, Address), price: f64) {
-        self.write()
-            .spot_prices
-            .insert(key, price);
+    fn set_spot_price(&self, key: (Address, Address), price: Option<f64>) {
+        let mut state = self.write();
+        match price {
+            Some(p) => state.spot_prices.insert(key, p),
+            // A re-warm that derives no price must not keep serving the pair's earlier
+            // price: an empty book would quote stale liquidity.
+            None => state.spot_prices.remove(&key),
+        };
     }
 
     fn get_limits(&self, key: (Address, Address), context: &LimitContext) -> Option<(U256, U256)> {
@@ -455,14 +459,16 @@ where
     /// Computes the spot price for a single `(sell, buy)` pair against `live_snapshot`'s overrides
     /// (or the plain indexed state when `None`): via the adapter's `price` function when the pool
     /// has the `PriceFunction` capability, otherwise approximated as a two-swap finite difference.
-    /// Does not touch the cache.
+    /// Returns `None` where the pair has no price in this direction (an empty side: nothing to
+    /// probe with), so warming it must clear — not keep — any cached price. Does not touch the
+    /// cache.
     fn compute_spot_price(
         &self,
         tokens: &HashMap<Bytes, Token>,
         sell_token_address: Address,
         buy_token_address: Address,
         live_snapshot: Option<&OverrideSnapshot>,
-    ) -> Result<f64, SimulationError> {
+    ) -> Result<Option<f64>, SimulationError> {
         let block_overrides = self.block_env(live_snapshot);
         if self
             .capabilities
@@ -493,17 +499,19 @@ where
                 .capabilities
                 .contains(&Capability::ScaledPrice)
             {
-                Ok(*price_result.first().ok_or_else(|| {
+                Ok(Some(*price_result.first().ok_or_else(|| {
                     SimulationError::FatalError("Calculated price array is empty".to_string())
-                })?)
+                })?))
             } else {
                 let unscaled_price = price_result.first().ok_or_else(|| {
                     SimulationError::FatalError("Calculated price array is empty".to_string())
                 })?;
                 let sell_token_decimals = self.get_decimals(tokens, &sell_token_address)?;
                 let buy_token_decimals = self.get_decimals(tokens, &buy_token_address)?;
-                Ok(*unscaled_price * 10f64.powi(sell_token_decimals as i32) /
-                    10f64.powi(buy_token_decimals as i32))
+                Ok(Some(
+                    *unscaled_price * 10f64.powi(sell_token_decimals as i32) /
+                        10f64.powi(buy_token_decimals as i32),
+                ))
             }
         } else {
             // If the pool does not support price function, we need to calculate spot prices by
@@ -514,68 +522,97 @@ where
                 live_snapshot,
             )?);
 
-            // Calculate the first sell amount (x1) as 1% of the maximum limit.
-            let x1 =
-                self.get_amount_limits(
-                    vec![sell_token_address, buy_token_address],
-                    overwrites.clone(),
-                    block_overrides.clone(),
-                )?
-                .0 / U256::from(100);
+            let (sell_limit, _) = self.get_amount_limits(
+                vec![sell_token_address, buy_token_address],
+                overwrites.clone(),
+                block_overrides.clone(),
+            )?;
 
-            // Calculate the second sell amount (x2) as x1 + 1% of x1. 1.01% of the max limit
-            let x2 = x1 + (x1 / U256::from(100));
-
-            // Perform a swap for the first sell amount (x1) and retrieve the received amount
-            // (y1).
-            let y1 = self
-                .adapter_contract
-                .swap(
-                    &self.id,
-                    sell_token_address,
-                    buy_token_address,
-                    false,
-                    x1,
-                    overwrites.clone(),
-                    block_overrides.clone(),
-                )?
-                .0
-                .received_amount;
-
-            // Perform a swap for the second sell amount (x2) and retrieve the received amount
-            // (y2).
-            let y2 = self
-                .adapter_contract
-                .swap(
-                    &self.id,
-                    sell_token_address,
-                    buy_token_address,
-                    false,
-                    x2,
-                    overwrites,
-                    block_overrides.clone(),
-                )?
-                .0
-                .received_amount;
-
-            let sell_token_decimals = self.get_decimals(tokens, &sell_token_address)?;
-            let buy_token_decimals = self.get_decimals(tokens, &buy_token_address)?;
-
-            let num = y2 - y1;
-            let den = x2 - x1;
-
-            // Calculate the marginal price, adjusting for token decimals.
-            let token_correction =
-                10f64.powi(sell_token_decimals as i32 - buy_token_decimals as i32);
-            let num_f64 = u256_to_f64(num)?;
-            let den_f64 = u256_to_f64(den)?;
-            if den_f64 == 0.0 {
-                return Err(SimulationError::FatalError(
-                    "Failed to compute marginal price: denominator converted to 0".into(),
-                ));
-            }
-            Ok(num_f64 / den_f64 * token_correction)
+            self.finite_difference_probe(
+                tokens,
+                sell_token_address,
+                buy_token_address,
+                sell_limit,
+                overwrites,
+                block_overrides,
+            )
         }
+    }
+
+    /// The two-swap finite-difference spot price for a pair without the `PriceFunction`
+    /// capability: `x1` = 1% of the sell limit, `x2` = 1.01%. Returns `None` where `x1` floors
+    /// to zero (an empty side — e.g. a quiet Hanji book whose `getLimits` returns 0), so the
+    /// caller skips the probe instead of asking the adapter to `swap(0)` (its `TooSmall`
+    /// revert, `0x42128ec3`, used to fail the whole decode and drop the market). A genuine
+    /// probe fault still propagates as an error: only the zero limit is "no price". Does not
+    /// touch the cache.
+    #[allow(clippy::too_many_arguments)]
+    fn finite_difference_probe(
+        &self,
+        tokens: &HashMap<Bytes, Token>,
+        sell_token_address: Address,
+        buy_token_address: Address,
+        sell_limit: U256,
+        overwrites: Option<HashMap<Address, HashMap<U256, U256>>>,
+        block_overrides: Option<BlockEnvOverrides>,
+    ) -> Result<Option<f64>, SimulationError> {
+        // Calculate the first sell amount (x1) as 1% of the maximum limit.
+        let x1 = sell_limit / U256::from(100);
+        if x1.is_zero() {
+            return Ok(None);
+        }
+
+        // Calculate the second sell amount (x2) as x1 + 1% of x1. 1.01% of the max limit
+        let x2 = x1 + (x1 / U256::from(100));
+
+        // Perform a swap for the first sell amount (x1) and retrieve the received amount
+        // (y1).
+        let y1 = self
+            .adapter_contract
+            .swap(
+                &self.id,
+                sell_token_address,
+                buy_token_address,
+                false,
+                x1,
+                overwrites.clone(),
+                block_overrides.clone(),
+            )?
+            .0
+            .received_amount;
+
+        // Perform a swap for the second sell amount (x2) and retrieve the received amount
+        // (y2).
+        let y2 = self
+            .adapter_contract
+            .swap(
+                &self.id,
+                sell_token_address,
+                buy_token_address,
+                false,
+                x2,
+                overwrites,
+                block_overrides.clone(),
+            )?
+            .0
+            .received_amount;
+
+        let sell_token_decimals = self.get_decimals(tokens, &sell_token_address)?;
+        let buy_token_decimals = self.get_decimals(tokens, &buy_token_address)?;
+
+        let num = y2 - y1;
+        let den = x2 - x1;
+
+        // Calculate the marginal price, adjusting for token decimals.
+        let token_correction = 10f64.powi(sell_token_decimals as i32 - buy_token_decimals as i32);
+        let num_f64 = u256_to_f64(num)?;
+        let den_f64 = u256_to_f64(den)?;
+        if den_f64 == 0.0 {
+            return Err(SimulationError::FatalError(
+                "Failed to compute marginal price: denominator converted to 0".into(),
+            ));
+        }
+        Ok(Some(num_f64 / den_f64 * token_correction))
     }
 
     /// Computes and stores spot prices against `live_snapshot`'s overrides (or the plain indexed
@@ -601,8 +638,10 @@ where
                 live_snapshot,
             )?;
 
+            // A pair the warm-up prices out of (an empty side) loses its cached price;
+            // every other pair keeps the freshly derived one.
             self.caches
-                .insert_spot_price((sell_token_address, buy_token_address), price);
+                .set_spot_price((sell_token_address, buy_token_address), price);
         }
 
         Ok(())
@@ -1133,14 +1172,22 @@ where
             )));
         }
 
-        // Compute this single pair on demand and cache it.
+        // Compute this single pair on demand and cache it. A pair the probe prices out of
+        // (an empty side) has no price to serve: report the miss instead of caching nothing
+        // and returning a stale read later.
         let tokens = HashMap::from([
             (base.address.clone(), base.clone()),
             (quote.address.clone(), quote.clone()),
         ]);
-        let price = self.compute_spot_price(&tokens, base_address, quote_address, None)?;
+        let price = self
+            .compute_spot_price(&tokens, base_address, quote_address, None)?
+            .ok_or_else(|| {
+                SimulationError::FatalError(format!(
+                    "Spot price not found for base token {base_address} and quote token {quote_address}"
+                ))
+            })?;
         self.caches
-            .insert_spot_price((base_address, quote_address), price);
+            .set_spot_price((base_address, quote_address), Some(price));
         Ok(price)
     }
 
@@ -1771,6 +1818,71 @@ mod tests {
             .unwrap();
         assert_eq!(dai_bal_spot_price, 0.13736685496467538);
         assert_eq!(bal_dai_spot_price, 7.050354297665408);
+    }
+
+    #[tokio::test]
+    async fn test_finite_difference_probe_skips_an_empty_side() {
+        // A pool without `PriceFunction` (Hanji) warms spot prices by probing with
+        // `x1 = sell_limit / 100`. A quiet book reports a zero sell limit; the probe must
+        // return "no price" instead of asking the adapter to `swap(0)` (its `TooSmall`
+        // revert, `0x42128ec3`, used to fail the whole decode and drop the market).
+        let pool_state = setup_pool_state().await;
+        let tokens: HashMap<Bytes, Token> = vec![dai(), bal()]
+            .into_iter()
+            .map(|t| (t.address.clone(), t))
+            .collect();
+        let overwrites = Some(
+            pool_state
+                .get_overwrites(vec![dai_addr(), bal_addr()], *MAX_BALANCE / U256::from(100), None)
+                .unwrap(),
+        );
+
+        // The empty side never reaches the adapter: no price, and no error to fail a decode.
+        assert_eq!(
+            pool_state
+                .finite_difference_probe(
+                    &tokens,
+                    dai_addr(),
+                    bal_addr(),
+                    U256::ZERO,
+                    overwrites.clone(),
+                    None,
+                )
+                .unwrap(),
+            None
+        );
+
+        // A fillable side still prices exactly as the pre-fix inline math: byte-identical to
+        // the value pinned in `test_set_spot_prices_without_capability`.
+        let (sell_limit, _) = pool_state
+            .get_amount_limits(vec![dai_addr(), bal_addr()], overwrites.clone(), None)
+            .unwrap();
+        assert!(!sell_limit.is_zero());
+        assert_eq!(
+            pool_state
+                .finite_difference_probe(
+                    &tokens,
+                    dai_addr(),
+                    bal_addr(),
+                    sell_limit,
+                    overwrites,
+                    None,
+                )
+                .unwrap(),
+            Some(0.13736685496467538)
+        );
+    }
+
+    #[test]
+    fn test_set_spot_price_replaces_with_none() {
+        // A re-warm that derives no price (an emptied book) must remove the pair's earlier
+        // price, not keep serving it stale.
+        let caches = DerivedCaches::default();
+        let key = (dai_addr(), bal_addr());
+        caches.set_spot_price(key, Some(1.5));
+        assert_eq!(caches.get_spot_price(key), Some(1.5));
+        caches.set_spot_price(key, None);
+        assert_eq!(caches.get_spot_price(key), None);
     }
 
     #[tokio::test]
