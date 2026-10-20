@@ -710,11 +710,29 @@ impl EthereumRpcClient {
             )
             .await
         } else {
-            Err(RPCError::SetupError(
-                "`trace_and_access_list` requires the `EthereumRpcClient` to have batching enabled. \
-                Either use a suitable RPC provider and enable batching in the `EthereumRpcClient`, \
-                or implement a non-batched version of this method.".to_string(),
-            ))
+            // Some public endpoints (e.g. Monad's) reject `debug_*` inside a batch.
+            self.retry_policy
+                .call_with_retry(|| async {
+                    let access_list_value: Value = self
+                        .inner
+                        .request("eth_createAccessList", access_list_params)
+                        .await?;
+                    let access_list_data = normalize_access_list_result(access_list_value)?;
+                    let pre_state_trace: GethTrace = self
+                        .inner
+                        .request("debug_traceCall", trace_call_params)
+                        .await?;
+                    Ok((access_list_data, pre_state_trace))
+                })
+                .await
+                .map_err(|e| {
+                    RPCError::from_alloy(
+                        format!(
+                            "Failed to trace and create access list for target {target}, block {block_hash}"
+                        ),
+                        e,
+                    )
+                })
         }
     }
 

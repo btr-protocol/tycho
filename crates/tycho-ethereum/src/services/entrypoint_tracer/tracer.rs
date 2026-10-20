@@ -1480,6 +1480,68 @@ mod tests {
         assert_eq!(accessed[&target], HashSet::from([slot(1), slot(2)]));
     }
 
+    /// With batching disabled the access list and the prestate trace are separate requests.
+    #[tokio::test]
+    async fn test_trace_without_batching() {
+        let mut server = Server::new_async().await;
+        let _access_list = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("eth_createAccessList".into()))
+            .with_status(200)
+            .with_body(
+                r#"{"jsonrpc": "2.0", "id": 0, "result": {
+                    "accessList": [{
+                        "address": "0x0000000000000000000000000000000000000001",
+                        "storageKeys": ["0x0000000000000000000000000000000000000000000000000000000000000001"]
+                    }],
+                    "gasUsed": "0x5dc0"
+                }}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let _trace = server
+            .mock("POST", "/")
+            .match_body(mockito::Matcher::Regex("debug_traceCall".into()))
+            .with_status(200)
+            .with_body(
+                r#"{"jsonrpc": "2.0", "id": 1, "result": {
+                    "0x0000000000000000000000000000000000000001": {"balance": "0x1"}
+                }}"#,
+            )
+            .expect(1)
+            .create_async()
+            .await;
+        let rpc = EthereumRpcClient::new(&server.url())
+            .expect("Failed to create EthereumRpcClient")
+            .with_batching(crate::rpc::config::RPCBatchingConfig::Disabled);
+        let tracer = EVMEntrypointService::new_with_config(&rpc, 0, 10);
+        let target = Bytes::from_str("0x0000000000000000000000000000000000000001").unwrap();
+        let entry_points = vec![EntryPointWithTracingParams::new(
+            EntryPoint::new("test:func()".to_string(), target.clone(), "func()".to_string()),
+            TracingParams::RPCTracer(RPCTracerParams::new(
+                None,
+                Bytes::from(&keccak256("func()")[0..4]),
+            )),
+        )];
+        let block_hash =
+            Bytes::from_str("0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef")
+                .unwrap();
+
+        let result = tracer
+            .trace(block_hash, entry_points)
+            .await
+            .remove(0)
+            .expect("trace succeeds");
+
+        let mut slot = [0u8; 32];
+        slot[31] = 1;
+        assert_eq!(
+            result.tracing_result.accessed_slots[&target],
+            HashSet::from([Bytes::from(slot.to_vec())])
+        );
+    }
+
     /// Test batch response handling with different response orderings
     /// This verifies that the client correctly matches responses by ID, not by array position
     #[rstest]
