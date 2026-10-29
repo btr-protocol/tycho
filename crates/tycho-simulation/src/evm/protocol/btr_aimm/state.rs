@@ -85,6 +85,9 @@ pub struct BtrAimmState {
     pub slot0: B256,
     /// `MarkStoreP8.classes()`: laneCls | clsA | clsB.
     pub classes: [B256; 3],
+    /// The class table is a wire-3 store's (storage v10); else wire 2. Set by a 97th `classes` byte.
+    #[serde(default)]
+    pub wire3: bool,
     /// Block time the marks are gated against.
     pub ts: u64,
     /// Which entry gates the legs; set by the component's static attribute `mode` (`coop` or
@@ -171,6 +174,7 @@ impl BtrAimmState {
 
     fn classes(&self) -> p8::Classes {
         p8::Classes {
+            wire: if self.wire3 { p8::Wire::V3 } else { p8::Wire::V2 },
             lane_cls: self.classes[0].0,
             cls_a: self.classes[1].0,
             cls_b: self.classes[2].0,
@@ -186,7 +190,7 @@ impl BtrAimmState {
     /// The leg's P-tier mark as the pool prices it, gated at `ts`.
     fn mark(&self, leg: &Leg, cls: &p8::Classes) -> Option<replica::Gate> {
         let (lane, internal, uoa, band) = st::decode_leg_oracle(&leg.w2.0);
-        let sw = p8::store_word(&leg.p.0, &leg.r.0, lane, cls);
+        let sw = p8::store_word(&leg.p.0, &leg.r.0, lane, cls, self.ts);
         replica::gated(&st::decode_store_word(&sw, internal, uoa, band).primary, self.ts)
     }
 

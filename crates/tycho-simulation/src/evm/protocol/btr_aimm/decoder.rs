@@ -2,7 +2,8 @@
 //! to 32 bytes) unless noted.
 //!
 //! * `slot0`: pool storage slot 0 (base token, protocol share).
-//! * `classes`: the impl's `MarkStoreP8.classes()` words `laneCls | clsA | clsB`, 96 bytes.
+//! * `classes`: the impl's `MarkStoreP8.classes()` words `laneCls | clsA | clsB`, 96 bytes; a 97th
+//!   byte `3` marks a wire-3 store (storage v10), absent = wire 2.
 //! * `block_timestamp`: block time, big-endian integer; the quote's staleness clock. Absent from a
 //!   snapshot = the snapshot header's timestamp. Every delta MUST carry it (the substream writes it
 //!   each block the pool changes): a delta without it is refused, since a clock that does not
@@ -98,10 +99,12 @@ pub(super) fn apply_attribute(
     match key {
         "slot0" => s.slot0 = word(v)?,
         "classes" => {
-            if v.len() != 96 {
-                return Err(format!("classes must be 96 bytes, got {}", v.len()));
+            // 96 bytes = wire 2; a 97th byte of 3 = wire 3
+            if v.len() != 96 && !(v.len() == 97 && v[96] == 3) {
+                return Err(format!("classes must be 96 bytes (+ wire 3 marker), got {}", v.len()));
             }
-            for (c, w) in s.classes.iter_mut().zip(v.chunks(32)) {
+            s.wire3 = v.len() == 97;
+            for (c, w) in s.classes.iter_mut().zip(v[..96].chunks(32)) {
                 *c = B256::from_slice(w);
             }
         }
