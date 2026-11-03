@@ -1,5 +1,5 @@
-//! BTR AIMM pool state = the raw storage words its quote reads (`Asset` words, `MarkStoreP8` P/R
-//! tier words, class table, curve blobs). Quotes run through `btr-core`; the gate that turns a
+//! BTR AIMM pool state = the raw storage words its quote reads (`Asset` words, `MarkStoreP8`
+//! store words, class table, curve blobs). Quotes run through `btr-core`; the gate that turns a
 //! store word into a usable mark, the curve decode and the pool builder are `btr_core::replica`
 //! (shared with the keepers), without the keepers' pending-push overlay: the state is the chain's,
 //! as of `ts`.
@@ -49,17 +49,15 @@ pub enum Mode {
     Coop,
 }
 
-/// One listed token's `Asset` words plus its oracle lane's tier words.
+/// One listed token's `Asset` words plus its oracle lane's store word.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Leg {
     /// reserves | liabilities
     pub w0: B256,
     /// risk config + oracle wiring
     pub w2: B256,
-    /// `MarkStoreP8` P tier word of the leg's lane
+    /// `MarkStoreP8` word of the leg's lane
     pub p: B256,
-    /// `MarkStoreP8` R tier word of the leg's lane
-    pub r: B256,
 }
 
 impl Leg {
@@ -187,11 +185,11 @@ impl BtrAimmState {
             .ok_or_else(|| invalid(format!("token {t} is not listed")))
     }
 
-    /// The leg's P-tier mark as the pool prices it, gated at `ts`.
+    /// The leg's mark as the pool prices it, gated at `ts`.
     fn mark(&self, leg: &Leg, cls: &p8::Classes) -> Option<replica::Gate> {
-        let (lane, internal, uoa, band) = st::decode_leg_oracle(&leg.w2.0);
-        let sw = p8::store_word(&leg.p.0, &leg.r.0, lane, cls, self.ts);
-        replica::gated(&st::decode_store_word(&sw, internal, uoa, band).primary, self.ts)
+        let (lane, internal, uoa) = st::decode_leg_oracle(&leg.w2.0);
+        let sw = p8::store_word(&leg.p.0, lane, cls, self.ts);
+        replica::gated(&st::decode_store_word(&sw, internal, uoa), self.ts)
     }
 
     /// Whether the leg is open to the entry this state's [`Mode`] answers for.
@@ -475,7 +473,7 @@ mod tests {
         ]);
         for (t, lane) in [(BASE, 1u8), (USDT, 0)] {
             let h = hex::encode([t; 20]);
-            for (f, w) in [("w0", w0), ("w2", w2(lane)), ("p", p), ("r", [0u8; 32])] {
+            for (f, w) in [("w0", w0), ("w2", w2(lane)), ("p", p)] {
                 m.insert(format!("leg/{h}/{f}"), b(w));
             }
         }
@@ -675,8 +673,8 @@ mod tests {
         assert!(s
             .get_amount_out(BigUint::from(10u128.pow(21)), &token(USDT), &token(BASE))
             .is_err());
-        // all four words cleared: the leg drops out; deleting an unlisted leg's word is a no-op
-        let all: Vec<String> = ["w0", "w2", "p", "r"]
+        // all three words cleared: the leg drops out; deleting an unlisted leg's word is a no-op
+        let all: Vec<String> = ["w0", "w2", "p"]
             .iter()
             .map(|f| format!("leg/{hu}/{f}"))
             .collect();
@@ -697,7 +695,7 @@ mod tests {
         let mut s = state();
         let before = s.clone();
         let hb = hex::encode([BASE; 20]);
-        let all: Vec<String> = ["w0", "w2", "p", "r"]
+        let all: Vec<String> = ["w0", "w2", "p"]
             .iter()
             .map(|f| format!("leg/{hb}/{f}"))
             .collect();

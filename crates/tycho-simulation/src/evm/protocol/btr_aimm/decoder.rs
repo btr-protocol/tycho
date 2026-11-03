@@ -3,20 +3,20 @@
 //!
 //! * `slot0`: pool storage slot 0 (base token, protocol share).
 //! * `classes`: the impl's `MarkStoreP8.classes()` words `laneCls | clsA | clsB`, 96 bytes; a 97th
-//!   byte `3` marks a wire-3 store (storage v10), absent = wire 2.
+//!   byte `3` marks a wire-3 store (storage v11), absent = wire 2.
 //! * `block_timestamp`: block time, big-endian integer; the quote's staleness clock. Absent from a
 //!   snapshot = the snapshot header's timestamp. Every delta MUST carry it (the substream writes it
 //!   each block the pool changes): a delta without it is refused, since a clock that does not
 //!   advance judges old marks fresh.
 //! * `leg/<token>/w0|w2`: the `Asset` words 0 (reserves | liabilities) and 2 (risk + oracle wiring)
 //!   of `assets[token]`; `<token>` = 40 lowercase hex chars, no `0x`. The base is a leg too.
-//! * `leg/<token>/p|r`: the P and R tier words of the token's oracle lane in the impl's
-//!   `MarkStoreP8` (`p8::tier_slot(1|2, lane)`).
+//! * `leg/<token>/p`: the word of the token's oracle lane in the impl's `MarkStoreP8`
+//!   (`p8::word_slot(wire, lane)`).
 //! * `mode`: `coop` or `public` (ASCII), the swap entry the legs are gated for (see `Mode`). A
 //!   static attribute of the component; absent = `public`.
 //! * `curve/<id>`: the curve blob, raw `eth_getCode` at `curve_pointer(pool, id)`. Deletable.
 //!
-//! Deletes: a `leg/*` word deleted reads as zero (the slot was cleared; a leg with all four words
+//! Deletes: a `leg/*` word deleted reads as zero (the slot was cleared; a leg with all three words
 //! zero drops out) and a `curve/<id>` deleted removes the blob. Any other key is structural and a
 //! delete of it is refused.
 use std::collections::HashMap;
@@ -73,7 +73,7 @@ pub(super) fn apply_attribute(
             return Err(format!("bad leg token in {key}"));
         }
         let token = Bytes::from(token);
-        if !matches!(field, "w0" | "w2" | "p" | "r") {
+        if !matches!(field, "w0" | "w2" | "p") {
             return Err(format!("unknown attribute {key}"));
         }
         let w = v
@@ -87,8 +87,7 @@ pub(super) fn apply_attribute(
         match field {
             "w0" => leg.w0 = w,
             "w2" => leg.w2 = w,
-            "p" => leg.p = w,
-            _ => leg.r = w,
+            _ => leg.p = w,
         }
         if *leg == Leg::default() {
             s.legs.remove(&token);
