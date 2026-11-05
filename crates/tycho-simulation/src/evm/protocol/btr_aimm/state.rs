@@ -54,16 +54,22 @@ pub enum Mode {
 pub struct Leg {
     /// reserves | liabilities
     pub w0: B256,
+    /// anchor | minLiquidity
+    #[serde(default)]
+    pub w1: B256,
     /// risk config + oracle wiring
     pub w2: B256,
+    /// `kneeBits` (read behind `KNEE_BIT`)
+    #[serde(default)]
+    pub w3: B256,
     /// `MarkStoreP8` word of the leg's lane
     pub p: B256,
 }
 
 impl Leg {
-    /// The `Asset` words as `btr_core::replica` reads them (word 1 is not read by the quote).
+    /// The 4 `Asset` words as `btr_core::replica` reads them.
     fn asset(&self) -> Asset {
-        Asset([self.w0.0, [0; 32], self.w2.0])
+        Asset([self.w0.0, self.w1.0, self.w2.0, self.w3.0])
     }
     fn endpoint(&self) -> Endpoint {
         self.asset().endpoint()
@@ -235,7 +241,18 @@ impl BtrAimmState {
                     .ok_or_else(|| invalid(format!("mark of {t} overflows")))?,
             );
         }
-        Ok(replica::named_pool(&key(&base_addr), &base.asset(), spokes))
+        let base_asset = base.asset();
+        let mut pool = replica::named_pool(&key(&base_addr), &base_asset, spokes);
+        // `PoolRead::named_pool`: the `minLiquidity` floor per endpoint and the `lastGoodC` fee
+        // booking (slot 0, layout v10). Peg guards, class rows and anchors are not modelled.
+        for s in &mut pool.state.spokes {
+            let t = hex::decode(s.token.trim_start_matches("0x"))
+                .map_err(|_| invalid("bad spoke token"))?;
+            s.guard.min_liquidity = self.leg(&Bytes::from(t))?.asset().min_liquidity();
+        }
+        pool.state.base_gate.min_liquidity = base_asset.min_liquidity();
+        pool.state.last_good_c_wad = st::decode_pool_slot0_v10(&self.slot0.0).last_good_c_wad;
+        Ok(pool)
     }
 
     /// `anchorPathQuoteLp` for `amt` of `tin` (native raw) on `p`, the settling hop's amounts.
@@ -462,7 +479,8 @@ mod tests {
             put(&mut w, a::MIN_FEE_PBPS.1, &50u16.to_be_bytes());
             put(&mut w, a::DECIMALS.1, &[18]);
             put(&mut w, a::FLAGS.1, &btr_core::SWAP_ENABLED_BIT.to_be_bytes());
-            put(&mut w, a::KAPPA_COV_BPS.1, &5000u16.to_be_bytes());
+            let bits = btr_core::cov::pack(1000, 10_000, 0, 11_000, 4096, 0).unwrap();
+            put(&mut w, a::COV_BITS.1, &bits.to_be_bytes());
             put(&mut w, a::ORACLE_BITS.1, &[lane]);
             w
         };
@@ -492,7 +510,7 @@ mod tests {
         let s = state();
         let e21 = 1_000_000_000_000_000_000_000u128;
         for (i, o, want) in
-            [(USDT, BASE, 1152242029591071039533u128), (BASE, USDT, 866917742750102823209)]
+            [(USDT, BASE, 1151967807792175357912u128), (BASE, USDT, 866762395114515755253)]
         {
             let r = s
                 .get_amount_out(BigUint::from(e21), &token(i), &token(o))
@@ -674,7 +692,7 @@ mod tests {
             .get_amount_out(BigUint::from(10u128.pow(21)), &token(USDT), &token(BASE))
             .is_err());
         // all three words cleared: the leg drops out; deleting an unlisted leg's word is a no-op
-        let all: Vec<String> = ["w0", "w2", "p"]
+        let all: Vec<String> = ["w0", "w1", "w2", "w3", "p"]
             .iter()
             .map(|f| format!("leg/{hu}/{f}"))
             .collect();
@@ -687,7 +705,7 @@ mod tests {
             assert!(apply(&mut state(), delta(&[], &[k], Some(1000))).is_err(), "{k}");
         }
         assert!(apply(&mut state(), delta(&[], &["curve/2"], Some(1000))).is_ok());
-        assert!(apply(&mut state(), delta(&[], &[&format!("leg/{hu}/w1")], Some(1000))).is_err());
+        assert!(apply(&mut state(), delta(&[], &[&format!("leg/{hu}/w4")], Some(1000))).is_err());
     }
 
     #[test]
@@ -695,7 +713,7 @@ mod tests {
         let mut s = state();
         let before = s.clone();
         let hb = hex::encode([BASE; 20]);
-        let all: Vec<String> = ["w0", "w2", "p"]
+        let all: Vec<String> = ["w0", "w1", "w2", "w3", "p"]
             .iter()
             .map(|f| format!("leg/{hb}/{f}"))
             .collect();
@@ -747,7 +765,7 @@ mod tests {
     fn settle_overflow_is_invalid_input_through_get_amount_out() {
         // the deposit would push the in leg's reserves past u128; the quote itself is fine
         let mut s = state();
-        set_book(&mut s, USDT, u128::MAX - E21 / 2, E24);
+        set_book(&mut s, USDT, u128::MAX - E21 / 2, u128::MAX - E21 / 2);
         let e = s.get_amount_out(BigUint::from(E21), &token(USDT), &token(BASE));
         assert!(
             matches!(&e, Err(SimulationError::InvalidInput(m, _)) if m.contains("settled books")),
@@ -755,7 +773,7 @@ mod tests {
             e.err()
         );
         // the same books one unit inside the edge settle
-        set_book(&mut s, USDT, u128::MAX - E21, E24);
+        set_book(&mut s, USDT, u128::MAX - E21, u128::MAX - E21);
         assert!(s
             .get_amount_out(BigUint::from(E21), &token(USDT), &token(BASE))
             .is_ok());
@@ -764,7 +782,7 @@ mod tests {
     #[test]
     fn limits_stop_where_settlement_would_overflow() {
         let mut s = state();
-        set_book(&mut s, USDT, u128::MAX - 10 * E21, E24);
+        set_book(&mut s, USDT, u128::MAX - 10 * E21, u128::MAX - 10 * E21);
         let (max_in, _) = s
             .get_limits(addr(USDT), addr(BASE))
             .unwrap();
@@ -839,7 +857,7 @@ mod tests {
         let before = out_of(&s, USDT, BASE).unwrap();
         let hu = hex::encode([USDT; 20]);
         let mut w0 = s.leg(&addr(USDT)).unwrap().w0.0;
-        put(&mut w0, 16, &(E24 / 4).to_be_bytes());
+        put(&mut w0, 16, &(E24 * 99 / 100).to_be_bytes());
         let d = delta(&[(format!("leg/{hu}/w0"), Bytes::from(w0.to_vec()))], &[], Some(1000));
         apply(&mut s, d).unwrap();
         assert_ne!(out_of(&s, USDT, BASE).unwrap(), before);

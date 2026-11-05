@@ -8,8 +8,8 @@
 //!   snapshot = the snapshot header's timestamp. Every delta MUST carry it (the substream writes it
 //!   each block the pool changes): a delta without it is refused, since a clock that does not
 //!   advance judges old marks fresh.
-//! * `leg/<token>/w0|w2`: the `Asset` words 0 (reserves | liabilities) and 2 (risk + oracle wiring)
-//!   of `assets[token]`; `<token>` = 40 lowercase hex chars, no `0x`. The base is a leg too.
+//! * `leg/<token>/w0|w1|w2|w3`: the `Asset` words 0 (reserves | liabilities), 1 (anchor |
+//!   minLiquidity), 2 (risk + oracle wiring) and 3 (`kneeBits`) of `assets[token]`; `<token>` = 40 lowercase hex chars, no `0x`. The base is a leg too.
 //! * `leg/<token>/p`: the word of the token's oracle lane in the impl's `MarkStoreP8`
 //!   (`p8::word_slot(wire, lane)`).
 //! * `mode`: `coop` or `public` (ASCII), the swap entry the legs are gated for (see `Mode`). A
@@ -73,7 +73,7 @@ pub(super) fn apply_attribute(
             return Err(format!("bad leg token in {key}"));
         }
         let token = Bytes::from(token);
-        if !matches!(field, "w0" | "w2" | "p") {
+        if !matches!(field, "w0" | "w1" | "w2" | "w3" | "p") {
             return Err(format!("unknown attribute {key}"));
         }
         let w = v
@@ -86,7 +86,9 @@ pub(super) fn apply_attribute(
         let leg = s.legs.entry(token.clone()).or_default();
         match field {
             "w0" => leg.w0 = w,
+            "w1" => leg.w1 = w,
             "w2" => leg.w2 = w,
+            "w3" => leg.w3 = w,
             _ => leg.p = w,
         }
         if *leg == Leg::default() {
