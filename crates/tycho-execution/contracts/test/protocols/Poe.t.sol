@@ -110,6 +110,28 @@ contract PoeExecutorTest is PammBase {
         _check(USDC, WMON, 5e6);
     }
 
+    /// The Rust `lfj_poe` encoder's bytes (`tests/pamm_encoding_tests.rs`, written to
+    /// `test/assets/calldata.txt`; X = WMON) are the Solidity layout, direction flag
+    /// included, and execute through the router in both directions.
+    function testRustEncodedVectorsExecute() public {
+        assertEq(tokenX, WMON, "pool X");
+        bytes memory xy = loadCallDataFromFile("test_encode_poe_wmon_usdc");
+        assertEq(xy, abi.encodePacked(POOL, WMON, USDC, true), "x->y layout");
+        (uint256 q,,,) = IPoePoolView(POOL).getQuote(true, 100e18);
+        (uint256 out,) = _swapData(
+            abi.encodePacked(address(ex), xy), POOL, WMON, USDC, 100e18, q
+        );
+        assertEq(out, q, "x->y exec == getQuote");
+
+        bytes memory yx = loadCallDataFromFile("test_encode_poe_usdc_wmon");
+        assertEq(yx, abi.encodePacked(POOL, USDC, WMON, false), "y->x layout");
+        (q,,,) = IPoePoolView(POOL).getQuote(false, 5e6);
+        (out,) = _swapData(
+            abi.encodePacked(address(ex), yx), POOL, USDC, WMON, 5e6, q
+        );
+        assertEq(out, q, "y->x exec == getQuote");
+    }
+
     function testMinOutTooHighReverts() public {
         (uint256 q,,,) = IPoePoolView(POOL).getQuote(WMON == tokenX, 100e18);
         _fund(WMON, 100e18);

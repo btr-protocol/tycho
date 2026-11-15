@@ -18,7 +18,8 @@ use crate::encoding::{
             erc_4626::ERC4626SwapEncoder, etherfi::EtherfiSwapEncoder,
             fallback::FallbackSwapEncoder, fermiswap::FermiSwapEncoder,
             fluid_v1::FluidV1SwapEncoder, hashflow::HashflowSwapEncoder,
-            lido_v4::LidoV4SwapEncoder, liquidity_party::LiquidityPartySwapEncoder,
+            lfj_poe::LfjPoeSwapEncoder, lido_v4::LidoV4SwapEncoder,
+            liquidity_party::LiquidityPartySwapEncoder,
             liquorice::LiquoriceSwapEncoder, lunarbase::LunarBaseSwapEncoder,
             maverick_v2::MaverickV2SwapEncoder, metric::MetricSwapEncoder,
             native::NativeSwapEncoder, native_wrap::WrapSwapEncoder, propamm::PropAMMSwapEncoder,
@@ -211,10 +212,12 @@ impl SwapEncoderRegistry {
             "btr_aimm" => {
                 Ok(Box::new(BtrAimmSwapEncoder::new(executor_address, self.chain, config)?))
             }
-            // Kuru and Hanji executors take the same packed (market, tokenIn, tokenOut) data.
-            "lunarbase" | "kuru" | "vm:hanji" => {
+            // Kuru, Hanji, Thog and WOOFi executors take the same packed
+            // (venue, tokenIn, tokenOut) data.
+            "lunarbase" | "kuru" | "vm:hanji" | "thog" | "woofi" => {
                 Ok(Box::new(LunarBaseSwapEncoder::new(executor_address, self.chain, config)?))
             }
+            "lfj_poe" => Ok(Box::new(LfjPoeSwapEncoder::new(executor_address, self.chain, config)?)),
             "native_wrapper" => {
                 Ok(Box::new(WrapSwapEncoder::new(executor_address, self.chain, config)?))
             }

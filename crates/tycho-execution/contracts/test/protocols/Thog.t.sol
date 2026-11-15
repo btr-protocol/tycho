@@ -119,6 +119,18 @@ contract ThogExecutorTest is PammBase {
         }
     }
 
+    /// The Rust `thog` encoder's bytes (`tests/pamm_encoding_tests.rs`, written to
+    /// `test/assets/calldata.txt`) are the Solidity layout and execute through the router.
+    function testRustEncodedVectorExecutes() public {
+        bytes memory venue = loadCallDataFromFile("test_encode_thog_usdc_wmon");
+        assertEq(venue, abi.encodePacked(THOG, USDC, WMON), "layout");
+        (uint256 q,) = IThogQuote(THOG).makerQuoteExactInput(USDC, WMON, 1e6);
+        (uint256 out,) = _swapData(
+            abi.encodePacked(address(ex), venue), THOG, USDC, WMON, 1e6, q
+        );
+        assertEq(out, q, "exec == quote");
+    }
+
     function testMinOutTooHighReverts() public {
         (uint256 q,) = IThogQuote(THOG).makerQuoteExactInput(USDC, WMON, 1e6);
         _fund(USDC, 1e6);

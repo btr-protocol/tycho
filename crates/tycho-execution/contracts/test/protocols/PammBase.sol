@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BUSL-1.1
 pragma solidity ^0.8.26;
 
-import {Test, console2} from "forge-std/Test.sol";
+import {console2} from "forge-std/Test.sol";
+import {TestUtils} from "../TestUtils.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {LeanTychoRouter, ClientFeeParams} from "@src/LeanTychoRouter.sol";
 
@@ -9,7 +10,7 @@ import {LeanTychoRouter, ClientFeeParams} from "@src/LeanTychoRouter.sol";
 /// through a LeanTychoRouter whose only executor is the one under test, from
 /// a funded user, as the arb keeper's TYCHO leg would call it.
 /// MONAD_RPC_URL=https://rpc3.monad.xyz forge test --use solar --network monad
-abstract contract PammBase is Test {
+abstract contract PammBase is TestUtils {
     address internal constant USDC = 0x754704Bc059F8C67012fEd69BC8A327a5aafb603;
     address internal constant AUSD = 0x00000000eFE302BEAA2b3e6e1b18d08D69a9012a;
     address internal constant WMON = 0x3bd359C1119dA7Da1D913D1C4D2B7c461115433A;

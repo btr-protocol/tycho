@@ -94,6 +94,18 @@ contract WooFiExecutorTest is PammBase {
         _check(WMON, WETH, 100e18);
     }
 
+    /// The Rust `woofi` encoder's bytes (`tests/pamm_encoding_tests.rs`, written to
+    /// `test/assets/calldata.txt`) are the Solidity layout and execute through the router.
+    function testRustEncodedVectorExecutes() public {
+        bytes memory venue = loadCallDataFromFile("test_encode_woofi_wmon_usdc");
+        assertEq(venue, abi.encodePacked(WOO, WMON, USDC), "layout");
+        uint256 q = IWooQuery(WOO).query(WMON, USDC, 100e18);
+        (uint256 out,) = _swapData(
+            abi.encodePacked(address(ex), venue), WOO, WMON, USDC, 100e18, q
+        );
+        assertEq(out, q, "exec == query");
+    }
+
     function testMinOutTooHighReverts() public {
         uint256 q = IWooQuery(WOO).query(WMON, USDC, 100e18);
         _fund(WMON, 100e18);

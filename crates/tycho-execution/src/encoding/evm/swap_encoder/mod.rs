@@ -15,6 +15,7 @@ pub use fallback::{FallbackProtocol, FallbackSwapData};
 mod fermiswap;
 mod fluid_v1;
 mod hashflow;
+mod lfj_poe;
 mod lido_v4;
 mod liquidity_party;
 mod liquorice;

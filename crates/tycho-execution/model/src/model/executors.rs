@@ -46,6 +46,9 @@ pub enum Executor {
     Hanji,
     Kuru,
     PropAMM,
+    Thog,
+    WooFi,
+    Poe,
 }
 
 /// Return value of [Executor::get_transfer_data]
@@ -66,7 +69,7 @@ pub struct CallbackTransferData {
 
 impl Executor {
     /// Array containing all [Executor]s.
-    pub const VARIANTS: [Executor; 14] = [
+    pub const VARIANTS: [Executor; 17] = [
         Executor::Curve,
         Executor::ERC4626,
         Executor::FluidV1,
@@ -81,6 +84,9 @@ impl Executor {
         Executor::Hanji,
         Executor::Kuru,
         Executor::PropAMM,
+        Executor::Thog,
+        Executor::WooFi,
+        Executor::Poe,
     ];
 
     /// <https://github.com/propeller-heads/tycho-indexer/blob/d0a5db4ab55baf9ff87fb54cdfb59e015866b409/crates/tycho-execution/contracts/interfaces/IExecutor.sol#L41>
@@ -396,6 +402,63 @@ impl Executor {
                     output_to_router: true,
                 })
             }
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/ThogExecutor.sol
+            // router approves the exact amount to the amm and revokes it; the amm debits
+            Self::Thog => Ok(TransferData {
+                transfer_type: TransferType::ProtocolWillDebit,
+                receiver: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+                    // trying more variants might find some very obscure bugs
+                    // in the future but slows down simulation a lot
+                    // and currently is ignored anyway
+                    Address::SENDER_CONTROLLED,
+                )?,
+                token_in: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 20, end: 40 },
+                    Address::POSSIBLY_ERC20_AND_NATIVE,
+                )?,
+                token_out: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 40, end: 60 },
+                    Address::POSSIBLY_ERC20_AND_NATIVE,
+                )?,
+                output_to_router: false,
+            }),
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/WooFiExecutor.sol
+            // router pushes the input to the pool
+            Self::WooFi => Ok(TransferData {
+                transfer_type: TransferType::Transfer,
+                receiver: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+                    // trying more variants might find some very obscure bugs
+                    // in the future but slows down simulation a lot
+                    // and currently is ignored anyway
+                    Address::SENDER_CONTROLLED,
+                )?,
+                token_in: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 20, end: 40 },
+                    Address::POSSIBLY_ERC20_AND_NATIVE,
+                )?,
+                token_out: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 40, end: 60 },
+                    Address::POSSIBLY_ERC20_AND_NATIVE,
+                )?,
+                output_to_router: false,
+            }),
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PoeExecutor.sol
+            // the pool is paid in its callback, nothing is transferred up front
+            Self::Poe => Ok(TransferData {
+                transfer_type: TransferType::None,
+                receiver: Address::Zero,
+                token_in: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 20, end: 40 },
+                    Address::POSSIBLY_ERC20_AND_NATIVE,
+                )?,
+                token_out: params.request(
+                    ParamKey::ProtocolData { swap_index, start: 40, end: 60 },
+                    Address::POSSIBLY_ERC20_AND_NATIVE,
+                )?,
+                output_to_router: false,
+            }),
             // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol
             Self::PropAMM => Ok(TransferData {
                 transfer_type: TransferType::Transfer,
@@ -754,6 +817,66 @@ impl Executor {
                 // the actual swap logic doesn't matter
                 Ok(())
             }
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/ThogExecutor.sol
+            Self::Thog => {
+                let venue = params.request(
+                    ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+                    // trying more variants might find some very obscure bugs
+                    // in the future but slows down simulation a lot
+                    // and currently is ignored anyway
+                    Address::SENDER_CONTROLLED,
+                )?;
+                if venue.is_sender_controlled() {
+                    // if the sender controls the venue,
+                    // the actual swap logic doesn't matter
+                    Ok(())
+                } else {
+                    Err(Error::Ignore {
+                        reason: "thog amm not sender controlled. not low hanging fruit. would require simulating real venue".into(),
+                    })
+                }
+            }
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/WooFiExecutor.sol
+            Self::WooFi => {
+                let venue = params.request(
+                    ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+                    // trying more variants might find some very obscure bugs
+                    // in the future but slows down simulation a lot
+                    // and currently is ignored anyway
+                    Address::SENDER_CONTROLLED,
+                )?;
+                if venue.is_sender_controlled() {
+                    // if the sender controls the venue,
+                    // the actual swap logic doesn't matter
+                    Ok(())
+                } else {
+                    Err(Error::Ignore {
+                        reason: "woofi pool not sender controlled. not low hanging fruit. would require simulating real venue".into(),
+                    })
+                }
+            }
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PoeExecutor.sol
+            Self::Poe => {
+                let pool = params.request(
+                    ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+                    // trying more variants might find some very obscure bugs
+                    // in the future but slows down simulation a lot
+                    // and currently is ignored anyway
+                    Address::SENDER_CONTROLLED,
+                )?;
+                if pool.is_sender_controlled() {
+                    // if the sender controls the pool,
+                    // the actual swap logic doesn't matter
+                    state.enter_callback(pool);
+                    _call_handle_callback_on_executor(params, state, vault, log, swap_index)?;
+                    state.leave_callback();
+                    Ok(())
+                } else {
+                    Err(Error::Ignore {
+                        reason: "lfj poe pool not sender controlled. not low hanging fruit. would require simulating real pool".into(),
+                    })
+                }
+            }
             // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol
             Self::PropAMM => {
                 let pamm = params.request(
@@ -810,7 +933,15 @@ impl Executor {
             Self::LunarBase => unimplemented!(),
             Self::Hanji => unimplemented!(),
             Self::Kuru => unimplemented!(),
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PoeExecutor.sol
+            Self::Poe => Ok(CallbackTransferData {
+                transfer_type: TransferType::Transfer,
+                // called via delegatecall. therefore not the router
+                receiver: state.msg_sender(),
+            }),
             Self::PropAMM => unimplemented!(),
+            Self::Thog => unimplemented!(),
+            Self::WooFi => unimplemented!(),
         }
     }
 
@@ -840,9 +971,14 @@ impl Executor {
             Self::LunarBase => unimplemented!("LunarBase doesn't use callbacks"),
             Self::Hanji => unimplemented!("Hanji doesn't use callbacks"),
             Self::Kuru => unimplemented!("Kuru doesn't use callbacks"),
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PoeExecutor.sol
+            // not worth modeling: the pool check and the exact-amount check are reverts only
+            Self::Poe => Ok(()),
             Self::PropAMM => {
                 unimplemented!("PropAMM doesn't use callbacks")
             }
+            Self::Thog => unimplemented!("Thog doesn't use callbacks"),
+            Self::WooFi => unimplemented!("WooFi doesn't use callbacks"),
         }
     }
 
@@ -907,6 +1043,18 @@ impl Executor {
             Self::Hanji => Address::Router,
             // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/KuruExecutor.sol
             Self::Kuru => Address::Router,
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/ThogExecutor.sol
+            Self::Thog => Address::Router,
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/WooFiExecutor.sol
+            Self::WooFi => params.request(
+                ParamKey::ProtocolData { swap_index, start: 0, end: 20 },
+                // trying more variants might find some very obscure bugs
+                // in the future but slows down simulation a lot
+                // and currently is ignored anyway
+                Address::SENDER_CONTROLLED,
+            )?,
+            // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PoeExecutor.sol
+            Self::Poe => Address::Router,
             // https://github.com/propeller-heads/tycho/blob/main/crates/tycho-execution/contracts/src/executors/PropAMMExecutor.sol
             Self::PropAMM => params.request(
                 ParamKey::ProtocolData { swap_index, start: 0, end: 20 },

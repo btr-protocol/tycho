@@ -299,6 +299,9 @@
     },
     "kuru": { "contract": "KuruExecutor", "args": [] },
     "vm:hanji": { "contract": "HanjiExecutor", "args": [] },
-    "btr_aimm": { "contract": "BtrAimmExecutor", "args": [] }
+    "btr_aimm": { "contract": "BtrAimmExecutor", "args": [] },
+    "thog": { "contract": "ThogExecutor", "args": [] },
+    "woofi": { "contract": "WooFiExecutor", "args": [] },
+    "lfj_poe": { "contract": "PoeExecutor", "args": [] }
   }
 }
