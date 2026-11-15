@@ -49,8 +49,25 @@ abstract contract PammBase is Test {
         uint256 amt,
         uint256 minOut
     ) internal returns (uint256 out, uint256 gas) {
+        return _swapData(
+            abi.encodePacked(executor, venue, tIn, tOut),
+            venue,
+            tIn,
+            tOut,
+            amt,
+            minOut
+        );
+    }
+
+    function _swapData(
+        bytes memory swapData,
+        address venue,
+        address tIn,
+        address tOut,
+        uint256 amt,
+        uint256 minOut
+    ) internal returns (uint256 out, uint256 gas) {
         _fund(tIn, amt);
-        bytes memory swapData = abi.encodePacked(executor, venue, tIn, tOut);
         vm.startPrank(user);
         uint256 b0 = IERC20(tOut).balanceOf(user);
         gas = gasleft();
