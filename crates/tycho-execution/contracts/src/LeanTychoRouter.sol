@@ -31,7 +31,7 @@ struct ClientFeeParams {
 ///         executor set fixed at construction. No roles, no fees, no vault,
 ///         no permit2, no pause, no storage: nothing to administer.
 /// @dev Pulls only from `msg.sender`, at most `amountIn` of `tokenIn` per
-///      call. Executors are delegatecalled and must be one of the ≤ 12
+///      call. Executors are delegatecalled and must be one of the ≤ 16
 ///      immutables. A venue callback is accepted only while a hop is
 ///      running and once per hop. Holds no balance between calls: a stray
 ///      balance (donation, venue dust) is spendable by any later route, so it
@@ -65,6 +65,10 @@ contract LeanTychoRouter {
     address internal immutable E9;
     address internal immutable E10;
     address internal immutable E11;
+    address internal immutable E12;
+    address internal immutable E13;
+    address internal immutable E14;
+    address internal immutable E15;
 
     /// @dev Transient, keccak256("btr.leanRouter") + 0..8: lock, payer,
     ///      tokenIn, pull budget, and the running hop (executor, first,
@@ -90,8 +94,8 @@ contract LeanTychoRouter {
 
     constructor(address[] memory executors_) {
         uint256 n = executors_.length;
-        if (n == 0 || n > 12) revert ExecutorCount();
-        address[12] memory e;
+        if (n == 0 || n > 16) revert ExecutorCount();
+        address[16] memory e;
         for (uint256 i = 0; i < n; ++i) {
             address x = executors_[i];
             if (x.code.length == 0) revert BadExecutor(x);
@@ -102,10 +106,13 @@ contract LeanTychoRouter {
         }
         (E0, E1, E2, E3, E4, E5) = (e[0], e[1], e[2], e[3], e[4], e[5]);
         (E6, E7, E8, E9, E10, E11) = (e[6], e[7], e[8], e[9], e[10], e[11]);
+        (E12, E13, E14, E15) = (e[12], e[13], e[14], e[15]);
     }
 
-    function executors() external view returns (address[12] memory) {
-        return [E0, E1, E2, E3, E4, E5, E6, E7, E8, E9, E10, E11];
+    function executors() external view returns (address[16] memory) {
+        return [
+            E0, E1, E2, E3, E4, E5, E6, E7, E8, E9, E10, E11, E12, E13, E14, E15
+        ];
     }
 
     function singleSwap(
@@ -388,7 +395,8 @@ contract LeanTychoRouter {
         if (
             e == address(0) || e != E0 && e != E1 && e != E2 && e != E3
                 && e != E4 && e != E5 && e != E6 && e != E7 && e != E8
-                && e != E9 && e != E10 && e != E11
+                && e != E9 && e != E10 && e != E11 && e != E12 && e != E13
+                && e != E14 && e != E15
         ) revert BadExecutor(e);
     }
 }

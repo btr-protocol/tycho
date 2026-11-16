@@ -404,7 +404,7 @@ contract LeanTychoRouterTest is Test {
     }
 
     function testConstructorRejects() public {
-        address[] memory e = new address[](13);
+        address[] memory e = new address[](17);
         vm.expectRevert(LeanTychoRouter.ExecutorCount.selector);
         new LeanTychoRouter(e);
         e = new address[](2);
