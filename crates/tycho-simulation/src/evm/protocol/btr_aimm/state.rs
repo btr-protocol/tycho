@@ -35,7 +35,8 @@ use super::decoder::apply_attribute;
 /// stop at the coverage wall well inside it; the bound only ends the search on a pool that never
 /// clamps (and on a decimals mix, where raw reserves are a loose scale).
 const LIMIT_CAP_X: u128 = 16;
-/// One `swap` (oracle-priced, no tick walk): rough, the arb path prices gas itself.
+/// One `swap` (oracle-priced, no tick walk): rough, the arb path prices gas itself. A swap that
+/// recalls from a yield hook adds [`Leg::recall_gas`].
 const SWAP_GAS: u64 = 250_000;
 
 /// Which `PricingLib` entry the quote answers for, i.e. which flags open a leg.
@@ -64,6 +65,14 @@ pub struct Leg {
     pub w3: B256,
     /// `MarkStoreP8` word of the leg's lane
     pub p: B256,
+    /// The part of the reserve held liquid (`getLiquidReserves`: reserves less what the leg's
+    /// yield hook has invested), native raw. A swap that takes more than it (plus `minLiquidity`)
+    /// makes the pool recall the difference from the hook inside the swap. `None` = no hook.
+    #[serde(default)]
+    pub liquid: Option<u128>,
+    /// Extra gas that recall costs, by the hook's kind (stack record data); 0 = none.
+    #[serde(default)]
+    pub recall_gas: u64,
 }
 
 impl Leg {
@@ -268,6 +277,19 @@ impl BtrAimmState {
         Ok(Swapped { out: f(h.amount_out)?, lp_fee: f(h.lp_fee)?, proto_fee: f(h.proto_fee)? })
     }
 
+    /// Gas of a swap that pays `out` of `tout`: [`SWAP_GAS`], plus the hook's recall gas when
+    /// `out + minLiquidity` is above the liquid part (Monad bills the gas limit).
+    fn gas(&self, tout: &Bytes, out: u128) -> u64 {
+        let Some(leg) = self.legs.get(tout) else {
+            return SWAP_GAS;
+        };
+        let recalls = leg.liquid.is_some_and(|liquid| {
+            out.checked_add(leg.asset().min_liquidity())
+                .is_none_or(|need| need > liquid)
+        });
+        SWAP_GAS + if recalls { leg.recall_gas } else { 0 }
+    }
+
     fn quote(&self, tin: &Bytes, tout: &Bytes, amt: u128) -> R<Swapped> {
         if tin == tout {
             return Err(invalid("same token"));
@@ -289,9 +311,12 @@ impl BtrAimmState {
         let mut next = self.clone();
         let book = |n: &mut Self| -> Option<()> {
             n.legs.get_mut(tin)?.settle(amt, 0, 0)?;
-            n.legs
-                .get_mut(tout)?
-                .settle(0, s.out.checked_add(s.proto_fee)?, s.lp_fee)
+            let leg = n.legs.get_mut(tout)?;
+            // what leaves the reserve leaves the liquid part first; a recall refills it (not modelled)
+            leg.liquid = leg
+                .liquid
+                .map(|l| l.saturating_sub(s.out.saturating_add(s.proto_fee)));
+            leg.settle(0, s.out.checked_add(s.proto_fee)?, s.lp_fee)
         };
         book(&mut next).ok_or_else(|| invalid("settled books leave u128"))?;
         Ok((s, next))
@@ -338,7 +363,8 @@ impl ProtocolSim for BtrAimmState {
     ) -> Result<GetAmountOutResult, SimulationError> {
         let (s, next) =
             self.swap(&token_in.address, &token_out.address, Self::amount(&amount_in)?)?;
-        Ok(GetAmountOutResult::new(BigUint::from(s.out), BigUint::from(SWAP_GAS), Box::new(next)))
+        let gas = self.gas(&token_out.address, s.out);
+        Ok(GetAmountOutResult::new(BigUint::from(s.out), BigUint::from(gas), Box::new(next)))
     }
 
     /// The largest input the pool still fills unclamped (doubling then bisection over the quote,
@@ -537,6 +563,39 @@ mod tests {
                 E24 + e21
             );
         }
+    }
+
+    /// A swap that pays more than the leg's liquid part (plus `minLiquidity`) recalls from its hook
+    /// and carries the recall gas; within the liquid part, or on a leg with no hook, it is the
+    /// plain swap gas.
+    #[test]
+    fn a_recall_backed_swap_carries_the_recall_gas() {
+        let e21 = 1_000_000_000_000_000_000_000u128;
+        let mut a = attrs(0);
+        let h = hex::encode([BASE; 20]);
+        // BASE is hooked: it holds 100 liquid of its E24 reserve; the hook recalls 314k gas
+        a.insert(format!("leg/{h}/liquid"), Bytes::from(100u128.to_be_bytes().to_vec()));
+        a.insert(format!("leg/{h}/recall_gas"), Bytes::from(314_000u64.to_be_bytes().to_vec()));
+        let s = state_from_attributes(&a, 1000).unwrap();
+        let gas = |s: &BtrAimmState, i: u8, o: u8| {
+            s.get_amount_out(BigUint::from(e21), &token(i), &token(o))
+                .unwrap()
+                .gas
+        };
+        // paying BASE out (1.15e21 against a liquid part of 100): recall
+        assert_eq!(gas(&s, USDT, BASE), BigUint::from(SWAP_GAS + 314_000));
+        // paying the unhooked USDT out: the plain swap
+        assert_eq!(gas(&s, BASE, USDT), BigUint::from(SWAP_GAS));
+        // a liquid part covering the payout (and the zero minLiquidity): the plain swap again
+        let mut a = a;
+        a.insert(format!("leg/{h}/liquid"), Bytes::from(u128::MAX.to_be_bytes().to_vec()));
+        let s = state_from_attributes(&a, 1000).unwrap();
+        assert_eq!(gas(&s, USDT, BASE), BigUint::from(SWAP_GAS));
+        // a delta that clears them restores the plain state
+        let mut s = s;
+        apply_attribute(&mut s, &format!("leg/{h}/liquid"), None).unwrap();
+        apply_attribute(&mut s, &format!("leg/{h}/recall_gas"), None).unwrap();
+        assert_eq!(s, state());
     }
 
     #[test]

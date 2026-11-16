@@ -12,6 +12,9 @@
 //!   minLiquidity), 2 (risk + oracle wiring) and 3 (`kneeBits`) of `assets[token]`; `<token>` = 40 lowercase hex chars, no `0x`. The base is a leg too.
 //! * `leg/<token>/p`: the word of the token's oracle lane in the impl's `MarkStoreP8`
 //!   (`p8::word_slot(wire, lane)`).
+//! * `leg/<token>/liquid`: the leg's liquid reserve (`getLiquidReserves`), big-endian integer up to
+//!   16 bytes; absent = no yield hook on the leg. `leg/<token>/recall_gas`: the gas a swap adds
+//!   recalling from that hook, big-endian integer up to 8 bytes, by the hook's kind (stack record).
 //! * `mode`: `coop` or `public` (ASCII), the swap entry the legs are gated for (see `Mode`). A
 //!   static attribute of the component; absent = `public`.
 //! * `curve/<id>`: the curve blob, raw `eth_getCode` at `curve_pointer(pool, id)`. Deletable.
@@ -73,6 +76,29 @@ pub(super) fn apply_attribute(
             return Err(format!("bad leg token in {key}"));
         }
         let token = Bytes::from(token);
+        if matches!(field, "liquid" | "recall_gas") {
+            let n = |v: &Bytes, max: usize| -> Result<u128, String> {
+                if v.len() > max {
+                    return Err(format!("{key} longer than {max} bytes: {}", v.len()));
+                }
+                Ok(v.iter()
+                    .fold(0u128, |a, b| a << 8 | u128::from(*b)))
+            };
+            // attributes arrive in any order: a set may precede the leg's words, a delete of an
+            // absent leg is nothing
+            if v.is_none() && !s.legs.contains_key(&token) {
+                return Ok(());
+            }
+            let leg = s.legs.entry(token.clone()).or_default();
+            match field {
+                "liquid" => leg.liquid = v.map(|v| n(v, 16)).transpose()?,
+                _ => leg.recall_gas = v.map_or(Ok(0), |v| n(v, 8))? as u64,
+            }
+            if *leg == Leg::default() {
+                s.legs.remove(&token);
+            }
+            return Ok(());
+        }
         if !matches!(field, "w0" | "w1" | "w2" | "w3" | "p") {
             return Err(format!("unknown attribute {key}"));
         }
